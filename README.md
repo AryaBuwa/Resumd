@@ -133,6 +133,13 @@ Please don't add external API calls, databases, or anything that compromises the
 
 ---
 
+## Acknowledgements
+
+Built with the assistance of AI tools.
+Scoring logic, privacy architecture, and design decisions are my own.
+
+--- 
+
 ## License
 
 MIT — use it, fork it, learn from it.

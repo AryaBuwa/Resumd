@@ -1,6 +1,6 @@
 # resumd
 
-> A stateless, privacy-first ATS resume scanner. No data stored. No APIs called. No nonsense.
+> An ATS-friendly resume scanner that respects your privacy.
 
 **[Live App →](https://resumd.streamlit.app)**
 
@@ -10,9 +10,9 @@
 
 Most ATS scanners ask you to create an account, store your resume, and quietly send your data to third-party services. Resumd doesn't.
 
-You upload your resume. It gets scanned in memory. You get a score. It's gone.
+You upload your resume. It gets scanned in-memory on the app server. You get a score. The session expires and it's gone.
 
-No database. No logging. No account. No black box.
+No persistent storage. No retention. No account. No black box.
 
 ---
 
@@ -25,7 +25,7 @@ No database. No logging. No account. No black box.
 - **Formatting Diagnostics** — Flags ATS parsing risks like image-based PDFs, missing contact info, decorative characters, multi-column layouts.
 - **Export Report** — Download a plain `.txt` audit report generated entirely from session memory.
 - **Dark / Light Mode** — Because your eyes matter.
-- **Purge Session** — One click wipes everything. No traces.
+- **Purge Session** — One click discards everything immediately.
 
 ---
 
@@ -33,13 +33,15 @@ No database. No logging. No account. No black box.
 
 This is not a marketing claim. It is verifiable in the source code.
 
-| Claim | Where to verify |
+| Claim | Accurate wording |
 |---|---|
-| No database writes | Search the codebase for any DB import — you won't find one |
-| No third-party API calls | `Ctrl+F` for `requests`, `httpx`, `urllib` — zero results |
-| No file logging | No `open()`, no `write()`, no temp files |
-| PDF parsed in memory | `fitz.open(stream=file_bytes)` — RAM only, never disk |
-| Session state only | All data lives in `st.session_state`, cleared on purge or tab close |
+| Processing | Runs in-memory on the app server — not browser-side, not client-side |
+| Storage | No persistent storage or retention of any kind |
+| External services | No external processing APIs or tracking services |
+| Session data | Discarded when the session expires or is purged |
+| Logging | No analytics, no session recording, no fingerprinting by this app |
+
+> **Note:** Streamlit's own infrastructure may maintain standard server logs outside the control of this app. This app itself performs no logging, tracking, or data retention.
 
 The only external call is loading the IBM Plex font from Google Fonts — a stylesheet, not your data.
 
@@ -55,7 +57,7 @@ Two signals, blended honestly:
 - **Jaccard Similarity** — shared keywords ÷ total unique keywords across both documents *(30% weight)*
 
 ```
-blended      = (0.70 × coverage) + (0.30 × jaccard)
+blended       = (0.70 × coverage) + (0.30 × jaccard)
 display_score = √blended × 98
 ```
 
@@ -77,13 +79,13 @@ A well-written resume with ~47% raw vocabulary diversity displays as ~73%. Hones
 | Layer | Tool |
 |---|---|
 | UI Framework | [Streamlit](https://streamlit.io) |
-| PDF Extraction | [PyMuPDF (fitz)](https://pymupdf.readthedocs.io) |
+| PDF Extraction | [PyMuPDF](https://pymupdf.readthedocs.io) (fitz) |
 | NLP | Hardcoded stop words + custom suffix stemmer |
-| Storage | `st.session_state` only — zero persistence |
+| Storage | `st.session_state` only — no persistence |
 | Styling | Custom CSS injected via `st.markdown` |
 | Deployment | [Streamlit Community Cloud](https://streamlit.io/cloud) |
 
-No external NLP libraries. No NLTK. No spaCy. No network calls for processing.
+No external NLP libraries. No NLTK. No network calls for processing.
 
 ---
 
@@ -91,7 +93,7 @@ No external NLP libraries. No NLTK. No spaCy. No network calls for processing.
 
 ```bash
 # Clone the repo
-git clone https://github.com/AryaBuwa/resumd
+git clone https://github.com/[your-handle]/resumd
 cd resumd
 
 # Install dependencies
@@ -101,7 +103,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-When running locally, your PDF never leaves your machine at all. Not even to Streamlit's servers.
+When running locally, your PDF never leaves your machine at all.
 
 ---
 
@@ -109,8 +111,8 @@ When running locally, your PDF never leaves your machine at all. Not even to Str
 
 ```
 resumd/
-├── app.py            # entire application — one file, fully commented
-├── requirements.txt  # streamlit, pymupdf — nothing else
+├── app.py
+├── requirements.txt
 └── README.md
 ```
 
@@ -120,8 +122,9 @@ resumd/
 
 - **Image-based / scanned PDFs** will not work — ATS systems can't read them either, so this is by design.
 - **Score is keyword-based** — it measures vocabulary overlap, not quality of experience or writing.
-- **Stemming is heuristic** — a lightweight custom stemmer is used instead of NLTK to keep the app fully offline-capable. Edge cases exist.
-- **Hosted version** processes your PDF on Streamlit's servers in volatile memory. If you want zero network exposure, run it locally.
+- **Stemming is heuristic** — a lightweight custom stemmer is used. Edge cases exist.
+- **Hosted version** processes your PDF on Streamlit's servers in volatile memory. For zero network exposure, run locally.
+- **Session timing** — session data is discarded on expiry or purge. Streamlit's session lifecycle controls exact timing, not this app.
 
 ---
 
@@ -129,7 +132,17 @@ resumd/
 
 PRs welcome. If you find a bug, open an issue. If you want to improve the scoring logic or add a feature, fork it and go.
 
-Please don't add external API calls, databases, or anything that compromises the stateless privacy model. That's the whole point.
+Please don't add external APIs, databases, or anything that compromises the stateless privacy model. That's the whole point.
+
+---
+
+## Usage & Disclaimer
+
+**Educational Use Only**
+This project is provided for educational and personal portfolio demonstration. You may fork this repository for learning purposes; however, redistribution or commercial use without explicit permission is prohibited.
+
+**Warranty Disclaimer**
+The software is provided "as is" without warranty of any kind. The author assumes no responsibility for data loss or damages resulting from use of this application. Use at your own discretion.
 
 ---
 
@@ -138,14 +151,8 @@ Please don't add external API calls, databases, or anything that compromises the
 Built with the assistance of AI tools.
 Scoring logic, privacy architecture, and design decisions are my own.
 
---- 
-
-## License
-
-MIT — use it, fork it, learn from it.
-
 ---
 
 <div align="center">
-  <sub>Built by <a href="https://github.com/AryaBuwa ">Arya</a> · No data retained · Ever.</sub>
+  <sub>Built by <a href="https://github.com/[your-handle]">Arya</a> · No persistent storage · Ever.</sub>
 </div>

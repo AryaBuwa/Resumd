@@ -1,10 +1,9 @@
 """
-Stateless ATS Auditor
-=====================
-Privacy-first resume scanner. Everything runs in-memory.
-No data is stored, logged, or sent to any server or third-party API.
-All processing is local Python — PyMuPDF parses the PDF on the server
-running this app, in volatile RAM, and is discarded immediately after.
+resumd — ATS-friendly Resume Scanner
+=====================================
+Privacy-first resume scanner. Everything runs in-memory on the app server.
+No persistent storage, no retention, no external processing APIs or tracking.
+Uploaded PDF is read into RAM, processed, and discarded when the session ends.
 
 Source code is public — every privacy claim here is verifiable line by line.
 """
@@ -18,10 +17,10 @@ import fitz  # PyMuPDF
 # CONSTANTS
 # ─────────────────────────────────────────────
 
-MAX_FILE_SIZE_MB   = 5
+MAX_FILE_SIZE_MB    = 5
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-MIN_RESUME_WORDS   = 200
-MIN_JD_WORDS       = 50
+MIN_RESUME_WORDS    = 200
+MIN_JD_WORDS        = 50
 
 # Hardcoded stop words — zero external dependencies, zero network calls.
 STOP_WORDS = {
@@ -60,11 +59,11 @@ SECTION_KEYWORDS = {
 # ─────────────────────────────────────────────
 
 def get_score_tier(score: float) -> tuple:
-    if score >= 80:  return ("Excellent Match",  "🟢")
-    if score >= 65:  return ("Strong Match",      "🟡")
-    if score >= 50:  return ("Fair Match",        "🟠")
-    if score >= 35:  return ("Weak Match",        "🔴")
-    return               ("Poor Match",           "⛔")
+    if score >= 80: return ("Excellent Match", "🟢")
+    if score >= 65: return ("Strong Match",    "🟡")
+    if score >= 50: return ("Fair Match",      "🟠")
+    if score >= 35: return ("Weak Match",      "🔴")
+    return                 ("Poor Match",      "⛔")
 
 
 # ─────────────────────────────────────────────
@@ -103,6 +102,7 @@ def extract_pdf_text(file_bytes: bytes) -> tuple:
     """
     Parse PDF entirely in-memory using PyMuPDF (fitz).
     file_bytes never leave this function — no disk write, no network call.
+    Session data is discarded when the session expires or is purged.
     Returns (text: str, warnings: list[str]).
     """
     try:
@@ -185,8 +185,6 @@ def run_full_audit(resume_text: str, jd_text: str) -> dict:
 
     SCORING FORMULA (simple, honest, explainable):
     ─────────────────────────────────────────────
-    We measure two things:
-
     1. Coverage  = matched tokens / JD tokens
        "How much of the JD vocabulary appears in your resume?"
 
@@ -195,12 +193,8 @@ def run_full_audit(resume_text: str, jd_text: str) -> dict:
 
     Blend: score_raw = 0.70 × coverage + 0.30 × jaccard
 
-    Then we apply a square-root stretch so the display score feels
-    proportional to effort. A resume with 50% raw coverage displays
-    as ~70%, not 50% — because covering half the JD keywords is
-    genuinely good performance for a real resume.
-
-    Final: display_score = √score_raw × 98   (capped at 98)
+    Square-root stretch: display_score = √score_raw × 98 (capped at 98)
+    A resume with 50% raw coverage displays as ~70%, not 50%.
     """
     r_tokens = tokenize(resume_text)
     j_tokens = tokenize(jd_text)
@@ -223,21 +217,21 @@ def run_full_audit(resume_text: str, jd_text: str) -> dict:
     tips        = generate_tips(resume_text, sections, gaps)
 
     return {
-        "mode":               "full",
-        "score":              round(score, 1),
-        "tier_label":         tier_label,
-        "tier_emoji":         tier_emoji,
-        "matched_keywords":   sorted(matched),
-        "gap_keywords":       sorted(gaps),
-        "token_count_resume": len(r_tokens),
-        "token_count_jd":     len(j_tokens),
-        "token_count_matched":len(matched),
-        "coverage_pct":       round(coverage * 100, 1),
-        "jaccard_pct":        round(jaccard  * 100, 1),
-        "sections":           sections,
-        "diagnostics":        diagnostics,
-        "tips":               tips,
-        "word_count":         len(resume_text.split()),
+        "mode":                "full",
+        "score":               round(score, 1),
+        "tier_label":          tier_label,
+        "tier_emoji":          tier_emoji,
+        "matched_keywords":    sorted(matched),
+        "gap_keywords":        sorted(gaps),
+        "token_count_resume":  len(r_tokens),
+        "token_count_jd":      len(j_tokens),
+        "token_count_matched": len(matched),
+        "coverage_pct":        round(coverage * 100, 1),
+        "jaccard_pct":         round(jaccard  * 100, 1),
+        "sections":            sections,
+        "diagnostics":         diagnostics,
+        "tips":                tips,
+        "word_count":          len(resume_text.split()),
     }
 
 
@@ -246,30 +240,24 @@ def run_health_check(resume_text: str) -> dict:
     Resume-only health check.
 
     RICHNESS SCORE:
-    ───────────────
     raw_ratio = unique meaningful tokens / total words
-
-    A well-written resume typically has raw_ratio ≈ 0.45–0.60.
-    We scale that to a fair display range:
-
     display_score = √(raw_ratio / 0.65) × 98
 
-    So raw_ratio 0.47 (like yours) → display ~73%, not 47%.
-    That's honest — 47% vocabulary diversity is genuinely solid writing.
+    A well-written resume with raw_ratio ~0.47 displays as ~73%, not 47%.
     """
-    r_tokens = tokenize(resume_text)
+    r_tokens    = tokenize(resume_text)
     sections    = detect_sections(resume_text)
     diagnostics = structural_diagnostics(resume_text)
     wc          = len(resume_text.split())
 
-    raw_ratio   = len(r_tokens) / wc if wc else 0
-    score       = min(math.sqrt(raw_ratio / 0.65) * 98, 98.0)
-    score       = max(score, 5.0)
+    raw_ratio = len(r_tokens) / wc if wc else 0
+    score     = min(math.sqrt(raw_ratio / 0.65) * 98, 98.0)
+    score     = max(score, 5.0)
 
     tips = generate_tips(resume_text, sections, set())
 
     return {
-        "mode":          "health",
+        "mode":           "health",
         "richness_score": round(score, 1),
         "raw_richness":   round(raw_ratio * 100, 1),
         "unique_tokens":  len(r_tokens),
@@ -305,10 +293,8 @@ def generate_export(result: dict) -> str:
     Generated entirely in-memory — no file is read or written.
     """
     mode  = result.get("mode", "full")
-    lines = [
-        "STATELESS ATS AUDITOR — AUDIT REPORT",
-        "=" * 42, "",
-    ]
+    lines = ["resumd — AUDIT REPORT", "=" * 42, ""]
+
     if mode == "full":
         lines += [
             f"Match Score    : {result['score']}%  {result['tier_emoji']} {result['tier_label']}",
@@ -343,9 +329,9 @@ def generate_export(result: dict) -> str:
 
     lines += [
         "", "─" * 42,
-        "Generated by Stateless ATS Auditor.",
+        "Generated by resumd.",
         "No resume data was stored or transmitted to any server or API.",
-        "Source: https://github.com/AryaBuwa/stateless-ats-auditor",
+        "Source: https://github.com/AryaBuwa/resumd",
     ]
     return "\n".join(lines)
 
@@ -385,39 +371,36 @@ def purge_session():
 # ─────────────────────────────────────────────
 
 def inject_css(dark: bool):
-    # ── theme tokens ──
     if dark:
-        bg           = "#0f0f0f"
-        bg_card      = "#1a1a1a"
-        bg_input     = "#141414"
-        text         = "#e8e8e8"
-        text2        = "#888888"
-        accent       = "#00d4aa"
-        accent_dim   = "#00a882"
-        border       = "#2a2a2a"
-        badge_bg     = "#1e2d2a"
-        warn_bg      = "#2d2200";  warn_bd  = "#ff9800"
-        err_bg       = "#2d1010";  err_bd   = "#f44336"
-        info_bg      = "#0d1a2d";  info_bd  = "#2196f3"
-        ok_bg        = "#0d2d1e";  ok_bd    = "#4caf50"
-        upload_bg    = "#1a1a1a"
-        upload_text  = "#888888"
+        bg          = "#0f0f0f"
+        bg_card     = "#1a1a1a"
+        bg_input    = "#141414"
+        text        = "#e8e8e8"
+        text2       = "#888888"
+        accent      = "#00d4aa"
+        accent_dim  = "#00a882"
+        border      = "#2a2a2a"
+        badge_bg    = "#1e2d2a"
+        warn_bg     = "#2d2200"; warn_bd = "#ff9800"
+        err_bg      = "#2d1010"; err_bd  = "#f44336"
+        info_bg     = "#0d1a2d"; info_bd = "#2196f3"
+        ok_bg       = "#0d2d1e"; ok_bd   = "#4caf50"
+        upload_bg   = "#1a1a1a"
     else:
-        bg           = "#f5f5f0"
-        bg_card      = "#ffffff"
-        bg_input     = "#fafafa"
-        text         = "#1a1a1a"
-        text2        = "#555555"
-        accent       = "#00a882"
-        accent_dim   = "#007a60"
-        border       = "#e0e0e0"
-        badge_bg     = "#e8f5f1"
-        warn_bg      = "#fff8e1";  warn_bd  = "#e67e00"
-        err_bg       = "#ffebee";  err_bd   = "#c62828"
-        info_bg      = "#e3f2fd";  info_bd  = "#1565c0"
-        ok_bg        = "#e8f5e9";  ok_bd    = "#2e7d32"
-        upload_bg    = "#ffffff"
-        upload_text  = "#333333"
+        bg          = "#f5f5f0"
+        bg_card     = "#ffffff"
+        bg_input    = "#fafafa"
+        text        = "#1a1a1a"
+        text2       = "#555555"
+        accent      = "#00a882"
+        accent_dim  = "#007a60"
+        border      = "#e0e0e0"
+        badge_bg    = "#e8f5f1"
+        warn_bg     = "#fff8e1"; warn_bd = "#e67e00"
+        err_bg      = "#ffebee"; err_bd  = "#c62828"
+        info_bg     = "#e3f2fd"; info_bd = "#1565c0"
+        ok_bg       = "#e8f5e9"; ok_bd   = "#2e7d32"
+        upload_bg   = "#ffffff"
 
     st.markdown(f"""
 <style>
@@ -425,31 +408,19 @@ def inject_css(dark: bool):
 
 *, *::before, *::after {{ box-sizing: border-box; }}
 
-/* ── App base ── */
 .stApp {{
     background-color: {bg} !important;
     color: {text} !important;
     font-family: 'IBM Plex Sans', sans-serif !important;
 }}
-[data-testid="stAppViewContainer"] {{
-    background-color: {bg} !important;
-}}
+[data-testid="stAppViewContainer"] {{ background-color: {bg} !important; }}
 [data-testid="stHeader"] {{ background: transparent !important; }}
 #MainMenu, footer, header {{ visibility: hidden; }}
 .stDeployButton {{ display: none !important; }}
 
-/* ── Global text colour — catches Streamlit's own labels ── */
-label, p, span, div {{
-    color: {text} !important;
-}}
+label, p, span, div {{ color: {text} !important; }}
+h1,h2,h3,h4 {{ font-family: 'IBM Plex Mono', monospace !important; color: {text} !important; }}
 
-/* ── Headings ── */
-h1,h2,h3,h4 {{
-    font-family: 'IBM Plex Mono', monospace !important;
-    color: {text} !important;
-}}
-
-/* ── Inputs ── */
 .stTextArea textarea, .stTextInput input {{
     background-color: {bg_input} !important;
     color: {text} !important;
@@ -469,31 +440,20 @@ h1,h2,h3,h4 {{
     font-size: 0.8rem !important;
 }}
 
-/* ── File uploader ── */
 [data-testid="stFileUploadDropzone"],
 [data-testid="stFileUploader"] section,
 section[data-testid="stFileUploadDropzone"] {{
-    background-color: {bg_input} !important;
-    background: {bg_input} !important;
+    background-color: {upload_bg} !important;
+    background: {upload_bg} !important;
     border: 2px dashed {border} !important;
     border-radius: 8px !important;
 }}
-[data-testid="stFileUploadDropzone"]:hover,
-section[data-testid="stFileUploadDropzone"]:hover {{
-    border-color: {accent} !important;
-}}
-/* All text inside the uploader */
+[data-testid="stFileUploadDropzone"]:hover {{ border-color: {accent} !important; }}
 [data-testid="stFileUploadDropzone"] *,
-[data-testid="stFileUploaderDropzoneInstructions"] * {{
-    color: {text2} !important;
-}}
-/* Hide the "Limit 200MB per file" text */
+[data-testid="stFileUploaderDropzoneInstructions"] * {{ color: {text2} !important; }}
 [data-testid="stFileUploadDropzone"] small,
 [data-testid="stFileUploaderDropzoneInstructions"] small,
-[data-testid="stFileUploadDropzone"] span small {{
-    display: none !important;
-}}
-/* Browse files button inside uploader */
+[data-testid="stFileUploadDropzone"] span small {{ display: none !important; }}
 [data-testid="stFileUploadDropzone"] button,
 [data-testid="stFileUploaderDropzoneInstructions"] button {{
     background-color: {bg_card} !important;
@@ -502,20 +462,11 @@ section[data-testid="stFileUploadDropzone"]:hover {{
     width: auto !important;
 }}
 
-/* ══════════════════════════════════════════
-   BUTTONS — nuclear override for Streamlit.
-   Targets every selector variant including
-   data-testid attributes Streamlit uses
-   internally to force background colours.
-   ══════════════════════════════════════════ */
-
-/* Kill Streamlit's own button background first */
+/* ── Buttons ── */
 [data-testid="baseButton-secondary"],
 [data-testid="baseButton-primary"],
 [data-testid="baseButton-secondary"]:focus,
-[data-testid="baseButton-primary"]:focus,
-button[kind="secondary"],
-button[kind="primary"] {{
+[data-testid="baseButton-primary"]:focus {{
     background-color: transparent !important;
     background: transparent !important;
     color: {accent} !important;
@@ -529,8 +480,6 @@ button[kind="primary"] {{
     width: 100% !important;
     box-shadow: none !important;
 }}
-
-/* Hover */
 [data-testid="baseButton-secondary"]:hover,
 [data-testid="baseButton-primary"]:hover {{
     background-color: {accent} !important;
@@ -546,7 +495,6 @@ button[kind="primary"] {{
     box-shadow: none !important;
 }}
 
-/* CTA wrapper — Run Analysis filled */
 .cta-btn [data-testid="baseButton-secondary"],
 .cta-btn [data-testid="baseButton-primary"],
 .cta-btn button {{
@@ -557,20 +505,14 @@ button[kind="primary"] {{
     font-size: 0.95rem !important;
 }}
 .cta-btn [data-testid="baseButton-secondary"]:hover,
-.cta-btn [data-testid="baseButton-primary"]:hover {{
-    background-color: {accent_dim} !important;
-    background: {accent_dim} !important;
-    color: {bg} !important;
-}}
-.cta-btn button:hover,
-.cta-btn .stButton > button:hover {{
+.cta-btn [data-testid="baseButton-primary"]:hover,
+.cta-btn button:hover {{
     background-color: {accent_dim} !important;
     background: {accent_dim} !important;
     color: {bg} !important;
     border-color: {accent_dim} !important;
 }}
 
-/* Danger — Purge Session */
 .danger-btn [data-testid="baseButton-secondary"],
 .danger-btn [data-testid="baseButton-primary"],
 .danger-btn button {{
@@ -589,7 +531,6 @@ button[kind="primary"] {{
     border-color: {err_bd} !important;
 }}
 
-/* Download button */
 .stDownloadButton [data-testid="baseButton-secondary"],
 .stDownloadButton button {{
     background-color: transparent !important;
@@ -605,7 +546,6 @@ button[kind="primary"] {{
     background-color: transparent !important;
 }}
 
-/* File uploader browse button — the black button inside the dropzone */
 [data-testid="stFileUploadDropzone"] [data-testid="baseButton-secondary"],
 [data-testid="stFileUploadDropzone"] button,
 [data-testid="stFileUploaderDropzoneInstructions"] button {{
@@ -623,10 +563,9 @@ button[kind="primary"] {{
     color: {bg} !important;
 }}
 
-/* ── Radio buttons — fully themed ── */
+/* ── Radio ── */
 .stRadio > div {{ gap: 0.4rem !important; flex-wrap: wrap; }}
-.stRadio label {{ color: {text} !important; }}
-.stRadio label p {{ color: {text} !important; }}
+.stRadio label, .stRadio label p {{ color: {text} !important; }}
 div[role="radiogroup"] label {{
     font-family: 'IBM Plex Mono', monospace !important;
     font-size: 0.85rem !important;
@@ -638,18 +577,16 @@ div[role="radiogroup"] label {{
     cursor: pointer !important;
     transition: all 0.15s ease !important;
 }}
-div[role="radiogroup"] label:hover {{
-    border-color: {accent} !important;
-}}
-/* Hide the actual radio circle — use border highlight instead */
+div[role="radiogroup"] label:hover {{ border-color: {accent} !important; }}
 div[role="radiogroup"] [data-testid="stMarkdownContainer"] p {{
     color: {text} !important;
     margin: 0 !important;
 }}
 
-/* ── Checkbox (dark mode toggle) ── */
-.stCheckbox label {{ color: {text2} !important; font-size: 0.8rem !important; }}
-.stCheckbox label p {{ color: {text2} !important; }}
+.stCheckbox label, .stCheckbox label p {{
+    color: {text2} !important;
+    font-size: 0.8rem !important;
+}}
 
 /* ── Expander ── */
 .streamlit-expanderHeader {{
@@ -667,10 +604,9 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] p {{
     border-radius: 0 0 6px 6px !important;
     color: {text} !important;
 }}
-.streamlit-expanderContent p, .streamlit-expanderContent li,
-.streamlit-expanderContent code {{
-    color: {text} !important;
-}}
+.streamlit-expanderContent p,
+.streamlit-expanderContent li,
+.streamlit-expanderContent code {{ color: {text} !important; }}
 
 /* ── Cards ── */
 .ats-card {{
@@ -686,42 +622,26 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] p {{
 /* ── Score ── */
 .score-number {{
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 4.5rem;
-    font-weight: 600;
-    color: {accent};
-    line-height: 1;
-    text-align: center;
+    font-size: 4.5rem; font-weight: 600;
+    color: {accent}; line-height: 1; text-align: center;
 }}
 .score-label {{
-    font-size: 0.85rem;
-    color: {text2};
-    text-align: center;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-top: 0.3rem;
+    font-size: 0.85rem; color: {text2}; text-align: center;
+    text-transform: uppercase; letter-spacing: 0.06em; margin-top: 0.3rem;
 }}
 .score-tier {{
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 1rem;
-    font-weight: 500;
-    color: {text};
-    text-align: center;
-    margin-top: 0.4rem;
+    font-size: 1rem; font-weight: 500;
+    color: {text}; text-align: center; margin-top: 0.4rem;
 }}
 .score-meta {{
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem;
-    color: {text2};
-    text-align: center;
-    margin-top: 0.6rem;
+    font-size: 0.72rem; color: {text2};
+    text-align: center; margin-top: 0.6rem;
 }}
 .score-bar-wrap {{
-    width: 100%;
-    height: 5px;
-    background: {border};
-    border-radius: 3px;
-    margin: 0.8rem 0;
-    overflow: hidden;
+    width: 100%; height: 5px; background: {border};
+    border-radius: 3px; margin: 0.8rem 0; overflow: hidden;
 }}
 .score-bar-fill {{
     height: 100%;
@@ -784,7 +704,7 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] p {{
     padding:0.65rem 0.85rem; font-size:0.8rem; font-family:'IBM Plex Mono',monospace;
     color:{text2}; display:flex; align-items:flex-start; gap:0.45rem;
 }}
-.trust-item .ti {{color:{accent}; flex-shrink:0;}}
+.trust-item .ti {{ color:{accent}; flex-shrink:0; }}
 
 /* ── Steps ── */
 .steps-row {{ display:flex; gap:0.75rem; flex-wrap:wrap; margin-top:0.5rem; }}
@@ -824,21 +744,12 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] p {{
     font-family:'IBM Plex Mono',monospace; font-size:0.72rem;
     letter-spacing:0.1em; opacity:0.45; color:{text};
 }}
-.ats-divider {{
-    border:none; border-top:1px solid {border}; margin:1.5rem 0;
-}}
-.pulse {{
-    animation:pulse 1.5s ease infinite;
-    color:{accent}; font-family:'IBM Plex Mono',monospace; font-size:0.88rem;
-}}
+.ats-divider {{ border:none; border-top:1px solid {border}; margin:1.5rem 0; }}
 
 /* ── Animations ── */
 @keyframes fadeInUp {{
     from {{ opacity:0; transform:translateY(10px); }}
     to   {{ opacity:1; transform:translateY(0); }}
-}}
-@keyframes fadeIn {{
-    from {{ opacity:0; }} to {{ opacity:1; }}
 }}
 @keyframes growBar {{
     from {{ transform:scaleX(0); }} to {{ transform:scaleX(1); }}
@@ -847,7 +758,6 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] p {{
     0%,100% {{ opacity:1; }} 50% {{ opacity:0.4; }}
 }}
 
-/* ── Scrollbar ── */
 ::-webkit-scrollbar {{ width:5px; height:5px; }}
 ::-webkit-scrollbar-track {{ background:{bg}; }}
 ::-webkit-scrollbar-thumb {{ background:{border}; border-radius:3px; }}
@@ -862,15 +772,15 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] p {{
 
 def render_hero():
     st.markdown("""
-<div class="hero-title">Stateless <span class="hero-accent">ATS</span> Auditor</div>
+<div class="hero-title">resum<span class="hero-accent">d</span></div>
 <div class="hero-sub">
   Feed it your resume. Optionally, a job description. Get a straight-talking
-  compatibility report — processed entirely in-memory, gone the moment you close the tab.
-  No accounts. No databases. No nonsense.
+  ATS compatibility report — processed entirely in-memory on the app server.
+  No accounts. No persistent storage. No nonsense.
 </div>
 <br/>
 <span class="mono-tag">v1.0.0</span>&nbsp;
-<span class="mono-tag">STATELESS</span>&nbsp;
+<span class="mono-tag">ATS SCANNER</span>&nbsp;
 <span class="mono-tag">OPEN SOURCE</span>
 """, unsafe_allow_html=True)
 
@@ -883,7 +793,7 @@ def render_how_it_works():
     <div class="step-item">
       <div class="step-num">01</div>
       <div class="step-title">Upload Resume</div>
-      <div class="step-desc">Drop your PDF. Text is extracted using PyMuPDF, locally in RAM.</div>
+      <div class="step-desc">Drop your PDF. Text is extracted in-memory on the app server using PyMuPDF.</div>
     </div>
     <div class="step-item">
       <div class="step-num">02</div>
@@ -898,7 +808,7 @@ def render_how_it_works():
     <div class="step-item">
       <div class="step-num">04</div>
       <div class="step-title">Review & Clear</div>
-      <div class="step-desc">Read your report, export it, hit Purge — data is gone. No traces.</div>
+      <div class="step-desc">Read your report, export it, hit Purge — session discarded. No traces.</div>
     </div>
   </div>
 </div>
@@ -910,15 +820,16 @@ def render_privacy_poc():
 <div class="ats-card ats-card-accent">
   <div class="section-label">DATA PRIVACY — PROOF OF CONCEPT</div>
   <div style="font-size:0.83rem; margin-top:0.6rem; line-height:1.6; opacity:0.8;">
-    Your resume is processed on the server running this app, in volatile RAM.
-    It is <b>never written to disk, stored in a database, sent to any third-party API, or logged.</b>
+    Your resume is processed in-memory on the server running this app.
+    It is <b>never written to disk, retained in a database, sent to external processing APIs, or tracked.</b>
+    Session data is discarded when the session expires or you hit Purge.
     The source code is public — verify every claim line by line.
   </div>
   <div class="trust-grid">
-    <div class="trust-item"><span class="ti">✓</span><div><b>No database writes</b><br/>Session state only — cleared on purge or tab close.</div></div>
-    <div class="trust-item"><span class="ti">✓</span><div><b>No external API calls</b><br/>PyMuPDF parses locally. Zero third-party transfer.</div></div>
-    <div class="trust-item"><span class="ti">✓</span><div><b>No file logging</b><br/>Bytes are processed then discarded from RAM.</div></div>
-    <div class="trust-item"><span class="ti">✓</span><div><b>Open source</b><br/>Every claim is verifiable in the published code.</div></div>
+    <div class="trust-item"><span class="ti">✓</span><div><b>No persistent storage</b><br/>No database, no disk writes, no retention of any kind.</div></div>
+    <div class="trust-item"><span class="ti">✓</span><div><b>No external processing APIs</b><br/>PDF parsed in-memory on the app server. Zero third-party transfer.</div></div>
+    <div class="trust-item"><span class="ti">✓</span><div><b>No tracking or logging</b><br/>No analytics, no session recording, no fingerprinting by this app.</div></div>
+    <div class="trust-item"><span class="ti">✓</span><div><b>Open source</b><br/>Every claim is verifiable in the published source code.</div></div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -959,8 +870,8 @@ def render_score_health(result: dict):
 
 def render_explainability(mode: str, result: dict):
     if mode == "full":
-        c = result.get("coverage_pct","—")
-        j = result.get("jaccard_pct","—")
+        c = result.get("coverage_pct", "—")
+        j = result.get("jaccard_pct",  "—")
         body = f"""
 **Two signals, one honest score.**
 
@@ -975,7 +886,7 @@ display  = √blended × 98
 The square-root stretch means covering 50% of a JD lands you ~70%, not 50% — because that's genuinely good alignment. Hard ceiling of 98% — a perfect score is a red flag, not a goal.
 """
     else:
-        r = result.get("raw_richness","—")
+        r = result.get("raw_richness", "—")
         body = f"""
 **Vocabulary diversity, scaled fairly.**
 
@@ -1010,8 +921,8 @@ def render_sections(sections: dict):
 def render_keywords(matched: list, gaps: list):
     mhtml = "".join(f'<span class="kw-match">{k}</span>' for k in matched[:60])
     ghtml = "".join(f'<span class="kw-gap">{k}</span>'   for k in gaps[:60])
-    mn = f"<div style='font-size:0.7rem;opacity:0.4;margin-top:0.4rem;'>Top 60 of {len(matched)}</div>" if len(matched)>60 else ""
-    gn = f"<div style='font-size:0.7rem;opacity:0.4;margin-top:0.4rem;'>Top 60 of {len(gaps)}</div>"   if len(gaps)>60   else ""
+    mn = f"<div style='font-size:0.7rem;opacity:0.4;margin-top:0.4rem;'>Top 60 of {len(matched)}</div>" if len(matched) > 60 else ""
+    gn = f"<div style='font-size:0.7rem;opacity:0.4;margin-top:0.4rem;'>Top 60 of {len(gaps)}</div>"   if len(gaps)   > 60 else ""
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1029,9 +940,9 @@ def render_keywords(matched: list, gaps: list):
 
 
 def render_diagnostics(diagnostics: list):
-    icons = {"warning":"⚠","error":"✖","info":"ℹ"}
+    icons = {"warning": "⚠", "error": "✖", "info": "ℹ"}
     items = "".join(
-        f'<div class="diag-{d["level"]}">{icons.get(d["level"],"·")} {d["message"]}</div>'
+        f'<div class="diag-{d["level"]}">{icons.get(d["level"], "·")} {d["message"]}</div>'
         for d in diagnostics
     )
     st.markdown(f"""
@@ -1061,7 +972,7 @@ def render_footer(dark: bool):
 <div style="border-top:1px solid {border_c}; padding:1.5rem 0 2.5rem; display:flex;
      justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-top:2rem;">
   <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; color:{text_c};">
-    stateless-ats-auditor &nbsp;·&nbsp; v1.0.0 &nbsp;·&nbsp; zero data retained
+    resumd &nbsp;·&nbsp; v1.0.0 &nbsp;·&nbsp; zero data retained
   </div>
   <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; color:{text_c};">
     built by &nbsp;<a href="https://github.com/AryaBuwa" target="_blank"
@@ -1078,7 +989,7 @@ def render_footer(dark: bool):
 
 def main():
     st.set_page_config(
-        page_title="Stateless ATS Auditor",
+        page_title="resumd — ATS Resume Scanner",
         page_icon="📋",
         layout="centered",
         initial_sidebar_state="collapsed",
@@ -1086,7 +997,6 @@ def main():
 
     init_session()
 
-    # ── Dark/light toggle (top right) ──
     col_hero, col_toggle = st.columns([5, 1])
     with col_toggle:
         dark = st.checkbox("🌙", value=st.session_state.dark_mode,
@@ -1095,42 +1005,38 @@ def main():
 
     inject_css(dark)
 
-    # JS fallback: force button styles that CSS alone can't reach due to
-    # Streamlit's internal specificity. Runs after DOM is ready.
-    accent_js  = "#00d4aa" if dark else "#00a882"
-    bg_js      = "#0f0f0f" if dark else "#f5f5f0"
-    err_js     = "#f44336" if dark else "#c62828"
-    card_js    = "#1a1a1a" if dark else "#ffffff"
+    # JS fallback — forces button colours Streamlit's shadow DOM overrides CSS for.
+    accent_js = "#00d4aa" if dark else "#00a882"
+    bg_js     = "#0f0f0f" if dark else "#f5f5f0"
+    err_js    = "#f44336" if dark else "#c62828"
+    card_js   = "#1a1a1a" if dark else "#ffffff"
     st.markdown(f"""
 <script>
 (function applyButtonFix() {{
     function fix() {{
-        // All stButton buttons
-        document.querySelectorAll('[data-testid="baseButton-secondary"], [data-testid="baseButton-primary"]').forEach(function(btn) {{
+        document.querySelectorAll('[data-testid="baseButton-secondary"],[data-testid="baseButton-primary"]').forEach(function(btn) {{
             if (btn.closest('.cta-btn')) {{
-                btn.style.setProperty('background-color', '{accent_js}', 'important');
-                btn.style.setProperty('color', '{bg_js}', 'important');
-                btn.style.setProperty('border-color', '{accent_js}', 'important');
+                btn.style.setProperty('background-color','{accent_js}','important');
+                btn.style.setProperty('color','{bg_js}','important');
+                btn.style.setProperty('border-color','{accent_js}','important');
             }} else if (btn.closest('.danger-btn')) {{
-                btn.style.setProperty('background-color', 'transparent', 'important');
-                btn.style.setProperty('color', '{err_js}', 'important');
-                btn.style.setProperty('border-color', '{err_js}', 'important');
+                btn.style.setProperty('background-color','transparent','important');
+                btn.style.setProperty('color','{err_js}','important');
+                btn.style.setProperty('border-color','{err_js}','important');
             }} else if (!btn.closest('[data-testid="stFileUploadDropzone"]') && !btn.closest('.stDownloadButton')) {{
-                btn.style.setProperty('background-color', 'transparent', 'important');
-                btn.style.setProperty('color', '{accent_js}', 'important');
-                btn.style.setProperty('border-color', '{accent_js}', 'important');
+                btn.style.setProperty('background-color','transparent','important');
+                btn.style.setProperty('color','{accent_js}','important');
+                btn.style.setProperty('border-color','{accent_js}','important');
             }}
         }});
-        // File uploader browse button
         document.querySelectorAll('[data-testid="stFileUploadDropzone"] button').forEach(function(btn) {{
-            btn.style.setProperty('background-color', '{card_js}', 'important');
-            btn.style.setProperty('color', '{accent_js}', 'important');
-            btn.style.setProperty('border', '1px solid {accent_js}', 'important');
+            btn.style.setProperty('background-color','{card_js}','important');
+            btn.style.setProperty('color','{accent_js}','important');
+            btn.style.setProperty('border','1px solid {accent_js}','important');
         }});
     }}
-    // Run immediately and on any DOM mutation
     fix();
-    new MutationObserver(fix).observe(document.body, {{childList: true, subtree: true}});
+    new MutationObserver(fix).observe(document.body,{{childList:true,subtree:true}});
 }})();
 </script>
 """, unsafe_allow_html=True)
@@ -1144,7 +1050,6 @@ def main():
     render_privacy_poc()
     st.markdown("<hr class='ats-divider'/>", unsafe_allow_html=True)
 
-    # ── Inputs ──
     st.markdown('<div class="section-label">DOCUMENT INPUT STREAM</div>', unsafe_allow_html=True)
     st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -1158,7 +1063,6 @@ def main():
 
     st.markdown("<br/>", unsafe_allow_html=True)
 
-    # Custom label above uploader (Streamlit's built-in "200MB" text is hidden via CSS ::after)
     st.markdown(
         '<div class="section-label" style="margin-bottom:0.3rem;">'
         'UPLOAD RESUME PDF &nbsp;·&nbsp; MAX 5 MB &nbsp;·&nbsp; PDF ONLY'
@@ -1198,7 +1102,6 @@ def main():
     if purge_clicked:
         purge_session()
 
-    # ── Analysis ──
     if run_clicked:
         st.session_state.audit_result  = None
         st.session_state.error_message = None
@@ -1223,7 +1126,7 @@ def main():
             )
 
         else:
-            file_bytes = uploaded_file.read()   # in-memory only, never written to disk
+            file_bytes = uploaded_file.read()  # in-memory only, never written to disk
             with st.spinner("Extracting and analyzing…"):
                 resume_text, warnings = extract_pdf_text(file_bytes)
 
@@ -1241,7 +1144,6 @@ def main():
                 else:
                     st.session_state.audit_result = run_health_check(resume_text)
 
-    # ── Errors ──
     if st.session_state.error_message:
         st.markdown(
             f'<div class="diag-error" style="margin-top:1rem;border-radius:6px;padding:0.8rem 1rem;">'
@@ -1256,7 +1158,6 @@ def main():
             unsafe_allow_html=True
         )
 
-    # ── Results ──
     result = st.session_state.audit_result
     if result:
         if "error" in result:
@@ -1290,7 +1191,7 @@ def main():
             st.download_button(
                 label="↓  Download Plain Text Report",
                 data=generate_export(result),
-                file_name="ats_audit_report.txt",
+                file_name="resumd_audit_report.txt",
                 mime="text/plain",
                 help="Generated from session memory. Nothing is sent anywhere.",
             )
@@ -1298,7 +1199,7 @@ def main():
             st.markdown(
                 '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:0.68rem;'
                 'opacity:0.3;margin-top:0.4rem;text-align:center;">'
-                'All data lives in this browser session. Close the tab or hit Purge to erase everything.'
+                'Session data is discarded when the session expires or you hit Purge.'
                 '</div>',
                 unsafe_allow_html=True
             )

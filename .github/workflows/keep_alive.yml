@@ -1,15 +1,32 @@
-name: Keep Resumd Alive
+name: Wake My App
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # every 6 hours
-  workflow_dispatch:        # manual trigger if needed
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
-  ping:
+  wake:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Resumd
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install Tools
         run: |
-          curl -s -o /dev/null -w "%{http_code}" https://resumd.streamlit.app
-          echo "Pinged resumd.streamlit.app"
+          pip install playwright
+          playwright install chromium
+      - name: Run Robot
+        run: |
+          python -c "
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              page.goto('https://resumd.streamlit.app/')
+              page.wait_for_timeout(15000)
+              if page.get_by_text('Yes, get this app back up').is_visible():
+                  page.get_by_text('Yes, get this app back up').click()
+                  print('Clicked the button!')
+              browser.close()
+          "

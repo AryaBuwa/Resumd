@@ -4,6 +4,17 @@
 
 **[Live App →](https://resumd.streamlit.app)**
 
+
+---
+
+<div align="center">
+
+![Status](https://img.shields.io/badge/Status-Active%20Development-22c55e?style=for-the-badge)
+![Next Release](https://img.shields.io/badge/Next%20Release-August%2020%2C%202026-2563eb?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-v1.0.1-black?style=for-the-badge)
+
+</div>
+
 ---
 
 ## What is this?

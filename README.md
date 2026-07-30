@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://resumd.streamlit.app">
-    <img src="https://img.shields.io/badge/LiveDemo-resumd.streamlit.app-00d4aa?style=for-the-badge" alt="Live Demo">
+    <img src="https://img.shields.io/badge/LiveDemo-resumd.streamlit.app-0b7e57?style=for-the-badge" alt="Live Demo">
   </a>
 </p>
 

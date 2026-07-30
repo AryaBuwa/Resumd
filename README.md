@@ -2,9 +2,11 @@
 
 > An ATS-friendly resume scanner that respects your privacy.
 
+---
+
 <p align="center">
   <a href="https://resumd.streamlit.app">
-    <img src="https://img.shields.io/badge/LiveDemo-resumd.streamlit.app-2372d9?style=for-the-badge" alt="Live Demo">
+    <img src="https://img.shields.io/badge/Live%20Demo-resumd.streamlit.app-2372d9?style=for-the-badge" alt="Live Demo">
   </a>
 </p>
 

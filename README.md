@@ -13,7 +13,6 @@
 ![Version](https://img.shields.io/badge/version-v1.1.0-black?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Framework](https://img.shields.io/badge/Framework-Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-22c55e?style=for-the-badge)
 
 </p>
@@ -46,6 +45,40 @@ These pipelines are merged into a single explainable score, providing a more bal
 - 📊 Reproducible results
 - 🧩 Modular architecture
 - 🌐 Fully open source
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Usage Notice](#usage-notice)
+- [Features](#features)
+- [Architecture](#architecture)
+- [How Hybrid ATS Scoring Works](#how-hybrid-ats-scoring-works)
+- [Section Evaluation Engine](#section-evaluation-engine)
+- [Resume Health Check](#resume-health-check)
+- [Full Audit](#full-audit)
+- [Formatting Diagnostics](#formatting-diagnostics)
+- [Explainability](#explainability)
+- [Privacy Model](#privacy-model)
+- [Tech Stack](#tech-stack)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Project Structure](#project-structure)
+- [Limitations](#limitations)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Disclaimer](#disclaimer)
+- [Acknowledgements](#acknowledgements)
+
+---
+
+> [!WARNING]
+> **Usage Notice**
+>
+> This repository is shared publicly to showcase the engineering, architecture, and implementation of the project.
+>
+> Please do not copy, redistribute, or submit this code as your own work. If you wish to build upon or reference this project, please contact the author first.
 
 ---
 

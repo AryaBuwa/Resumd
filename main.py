@@ -22,7 +22,6 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 MIN_RESUME_WORDS    = 200
 MIN_JD_WORDS        = 50
 
-# Hardcoded stop words — zero external dependencies, zero network calls.
 STOP_WORDS = {
     "a","an","the","and","or","but","in","on","at","to","for","of","with",
     "by","from","is","was","are","were","be","been","being","have","has",
@@ -44,13 +43,35 @@ STOP_WORDS = {
 }
 
 SECTION_KEYWORDS = {
-    "experience":     ["experience","employment","work history","career","positions","roles","work experience"],
-    "education":      ["education","academic","degree","university","college","school","qualification","bachelor","master"],
-    "skills":         ["skills","technologies","tools","competencies","expertise","technical","proficiencies","tech stack"],
-    "summary":        ["summary","objective","profile","about","overview","introduction","professional summary"],
-    "projects":       ["projects","portfolio","work samples","case studies","personal projects","open source"],
-    "certifications": ["certifications","certificates","licenses","accreditations","credentials"],
-    "achievements":   ["achievements","awards","honors","recognition","accomplishments","highlights"],
+    "Experience":     ["experience","employment","work history","career","positions","roles","work experience"],
+    "Education":      ["education","academic","degree","university","college","school","qualification","bachelor","master"],
+    "Skills":         ["skills","technologies","tools","competencies","expertise","technical","proficiencies","tech stack"],
+    "Summary":        ["summary","objective","profile","about","overview","introduction","professional summary"],
+    "Projects":       ["projects","portfolio","work samples","case studies","personal projects","open source"],
+    "Certifications": ["certifications","certificates","licenses","accreditations","credentials"],
+    "Achievements":   ["achievements","awards","honors","recognition","accomplishments","highlights"],
+}
+
+# ATS benchmark scores per section (what a strong resume should score)
+SECTION_BENCHMARKS = {
+    "Experience":     85,
+    "Education":      75,
+    "Skills":         90,
+    "Summary":        70,
+    "Projects":       80,
+    "Certifications": 65,
+    "Achievements":   70,
+}
+
+# Weight of each section in final score
+SECTION_WEIGHTS = {
+    "Experience":     0.30,
+    "Skills":         0.25,
+    "Projects":       0.20,
+    "Summary":        0.10,
+    "Education":      0.08,
+    "Certifications": 0.04,
+    "Achievements":   0.03,
 }
 
 
@@ -66,16 +87,17 @@ def get_score_tier(score: float) -> tuple:
     return                 ("Poor Match",      "⛔")
 
 
+def score_color(score: float) -> str:
+    if score >= 75: return "#00d4aa"
+    if score >= 55: return "#f59e0b"
+    return "#f44336"
+
+
 # ─────────────────────────────────────────────
 # TEXT PROCESSING
 # ─────────────────────────────────────────────
 
 def simple_stem(word: str) -> str:
-    """
-    Lightweight suffix stripping — no libraries, no network.
-    Handles the most common English inflections well enough
-    for keyword intersection matching.
-    """
     for suffix in ["ing","tion","tions","ation","ations","ed","er","ers",
                    "ly","ment","ments","ness","ity","ies","es","s"]:
         if word.endswith(suffix) and len(word) - len(suffix) >= 3:
@@ -84,10 +106,6 @@ def simple_stem(word: str) -> str:
 
 
 def tokenize(text: str) -> set:
-    """
-    Lowercase → strip non-alphanumeric (keep +, #) → split →
-    remove stop words → stem → return unique token set.
-    """
     text = text.lower()
     text = re.sub(r"[^a-z0-9\s\+\#]", " ", text)
     cleaned = set()
@@ -98,13 +116,34 @@ def tokenize(text: str) -> set:
     return cleaned
 
 
+def extract_section_text(full_text: str, section: str, keywords: list) -> str:
+    """Extract approximate text belonging to a section."""
+    tl = full_text.lower()
+    lines = full_text.split('\n')
+    section_lines = []
+    in_section = False
+
+    for i, line in enumerate(lines):
+        ll = line.lower().strip()
+        # detect section header
+        if any(kw in ll for kw in keywords) and len(ll) < 50:
+            in_section = True
+            continue
+        # detect next section header
+        if in_section:
+            is_new_section = False
+            for other_section, other_kws in SECTION_KEYWORDS.items():
+                if other_section != section and any(kw in ll for kw in other_kws) and len(ll) < 50:
+                    is_new_section = True
+                    break
+            if is_new_section:
+                break
+            section_lines.append(line)
+
+    return ' '.join(section_lines) if section_lines else ''
+
+
 def extract_pdf_text(file_bytes: bytes) -> tuple:
-    """
-    Parse PDF entirely in-memory using PyMuPDF (fitz).
-    file_bytes never leave this function — no disk write, no network call.
-    Session data is discarded when the session expires or is purged.
-    Returns (text: str, warnings: list[str]).
-    """
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as e:
@@ -121,10 +160,79 @@ def extract_pdf_text(file_bytes: bytes) -> tuple:
     if not text.strip():
         warnings.append(
             "No extractable text found. This PDF may be image-based or scanned. "
-            "ATS systems (and this tool) cannot parse image-only PDFs — "
-            "please use a digitally-created, text-selectable PDF."
+            "ATS systems cannot parse image-only PDFs — please use a text-selectable PDF."
         )
     return text, warnings
+
+
+# ─────────────────────────────────────────────
+# SECTION SCORING ENGINE
+# ─────────────────────────────────────────────
+
+def score_section(section: str, section_text: str, resume_tokens: set,
+                  jd_tokens: set, sections_found: dict) -> float:
+    """
+    Score each section on a 0-100 scale based on:
+    - Whether the section exists (presence score)
+    - Keyword density within the section
+    - JD keyword overlap within the section (if JD provided)
+    """
+    # Section not found — base penalty
+    if not sections_found.get(section, False):
+        return 0.0
+
+    # Section exists but no text extracted — partial credit
+    if not section_text.strip():
+        return 35.0
+
+    section_tokens = tokenize(section_text)
+    if not section_tokens:
+        return 35.0
+
+    # Base score for presence
+    base = 40.0
+
+    # Keyword density score (unique tokens vs word count)
+    word_count = len(section_text.split())
+    if word_count > 0:
+        density = len(section_tokens) / word_count
+        density_score = min(math.sqrt(density / 0.5) * 30, 30.0)
+    else:
+        density_score = 0.0
+
+    # JD overlap score (if JD tokens available)
+    if jd_tokens:
+        section_jd_match = section_tokens & jd_tokens
+        jd_overlap = len(section_jd_match) / len(jd_tokens) if jd_tokens else 0
+        jd_score = min(math.sqrt(jd_overlap) * 30, 30.0)
+    else:
+        # health check mode — score by richness only
+        jd_score = density_score
+
+    total = base + density_score + jd_score
+    return min(round(total, 1), 98.0)
+
+
+def compute_section_scores(resume_text: str, resume_tokens: set,
+                            jd_tokens: set, sections_found: dict) -> dict:
+    """Compute individual score for each section."""
+    scores = {}
+    for section, keywords in SECTION_KEYWORDS.items():
+        section_text = extract_section_text(resume_text, section, keywords)
+        scores[section] = score_section(
+            section, section_text, resume_tokens, jd_tokens, sections_found
+        )
+    return scores
+
+
+def compute_weighted_final_score(section_scores: dict) -> float:
+    """Weighted average of section scores → final display score."""
+    total = sum(
+        section_scores.get(s, 0) * w
+        for s, w in SECTION_WEIGHTS.items()
+    )
+    # Normalize to 0-98
+    return min(round(total, 1), 98.0)
 
 
 # ─────────────────────────────────────────────
@@ -137,32 +245,28 @@ def detect_sections(text: str) -> dict:
 
 
 def structural_diagnostics(text: str) -> list:
-    """
-    Structural checks — returns list of {level, message} dicts.
-    Levels: "error" | "warning" | "info"
-    """
     issues = []
-    words  = text.split()
-    wc     = len(words)
+    words = text.split()
+    wc    = len(words)
 
     if wc < MIN_RESUME_WORDS:
         issues.append({"level": "error",
             "message": f"Resume is very short ({wc} words). Most ATS expect ≥{MIN_RESUME_WORDS} words."})
     elif wc > 1200:
         issues.append({"level": "warning",
-            "message": f"Resume is long ({wc} words). Recruiters and ATS prefer 400–800 words (1–2 pages)."})
+            "message": f"Resume is long ({wc} words). Recruiters prefer 400–800 words (1–2 pages)."})
 
     if not re.search(r"\d+\s*%|\$\s*\d+|\d+\s*\+?\s*(years?|months?|clients?|projects?|teams?|employees?|users?|million|k\b)", text, re.I):
         issues.append({"level": "warning",
-            "message": "No quantifiable achievements found (e.g. '40% faster', '$2M revenue', '10+ projects'). Numbers help."})
+            "message": "No quantifiable achievements found (e.g. '40% faster', '$2M revenue', '10+ projects')."})
 
     if not re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text):
         issues.append({"level": "warning",
-            "message": "No email address detected in extractable text. Verify it's not embedded in an image."})
+            "message": "No email address detected. Verify it's not embedded in an image."})
 
     if text.count("\t") > 20:
         issues.append({"level": "warning",
-            "message": f"High tab count ({text.count(chr(9))}) detected — possible multi-column layout. Some ATS struggle with this."})
+            "message": f"High tab count ({text.count(chr(9))}) — possible multi-column layout. Some ATS struggle with this."})
 
     if len(re.findall(r"[|■●◆▸►•‣⦿◉]", text)) > 15:
         issues.append({"level": "warning",
@@ -180,27 +284,11 @@ def structural_diagnostics(text: str) -> list:
 
 
 def run_full_audit(resume_text: str, jd_text: str) -> dict:
-    """
-    Full audit — resume vs job description.
-
-    SCORING FORMULA (simple, honest, explainable):
-    ─────────────────────────────────────────────
-    1. Coverage  = matched tokens / JD tokens
-       "How much of the JD vocabulary appears in your resume?"
-
-    2. Jaccard   = matched tokens / union of all tokens
-       "How focused is the overlap relative to both documents combined?"
-
-    Blend: score_raw = 0.70 × coverage + 0.30 × jaccard
-
-    Square-root stretch: display_score = √score_raw × 98 (capped at 98)
-    A resume with 50% raw coverage displays as ~70%, not 50%.
-    """
     r_tokens = tokenize(resume_text)
     j_tokens = tokenize(jd_text)
 
     if not j_tokens:
-        return {"error": "Job description produced no tokens after processing. Try pasting more content."}
+        return {"error": "Job description produced no tokens. Try pasting more content."}
 
     matched  = r_tokens & j_tokens
     gaps     = j_tokens - r_tokens
@@ -208,17 +296,23 @@ def run_full_audit(resume_text: str, jd_text: str) -> dict:
 
     coverage = len(matched) / len(j_tokens)
     jaccard  = len(matched) / len(union) if union else 0
-    raw      = 0.70 * coverage + 0.30 * jaccard
-    score    = min(math.sqrt(raw) * 98, 98.0)
 
-    tier_label, tier_emoji = get_score_tier(score)
-    sections    = detect_sections(resume_text)
+    sections_found  = detect_sections(resume_text)
+    section_scores  = compute_section_scores(resume_text, r_tokens, j_tokens, sections_found)
+    weighted_score  = compute_weighted_final_score(section_scores)
+
+    # Blend weighted section score with keyword matching score
+    kw_raw   = 0.70 * coverage + 0.30 * jaccard
+    kw_score = min(math.sqrt(kw_raw) * 98, 98.0)
+    final    = round(0.60 * weighted_score + 0.40 * kw_score, 1)
+
+    tier_label, tier_emoji = get_score_tier(final)
     diagnostics = structural_diagnostics(resume_text)
-    tips        = generate_tips(resume_text, sections, gaps)
+    tips        = generate_tips(resume_text, sections_found, gaps, section_scores)
 
     return {
         "mode":                "full",
-        "score":               round(score, 1),
+        "score":               final,
         "tier_label":          tier_label,
         "tier_emoji":          tier_emoji,
         "matched_keywords":    sorted(matched),
@@ -228,7 +322,8 @@ def run_full_audit(resume_text: str, jd_text: str) -> dict:
         "token_count_matched": len(matched),
         "coverage_pct":        round(coverage * 100, 1),
         "jaccard_pct":         round(jaccard  * 100, 1),
-        "sections":            sections,
+        "sections":            sections_found,
+        "section_scores":      section_scores,
         "diagnostics":         diagnostics,
         "tips":                tips,
         "word_count":          len(resume_text.split()),
@@ -236,73 +331,75 @@ def run_full_audit(resume_text: str, jd_text: str) -> dict:
 
 
 def run_health_check(resume_text: str) -> dict:
-    """
-    Resume-only health check.
+    r_tokens       = tokenize(resume_text)
+    sections_found = detect_sections(resume_text)
+    section_scores = compute_section_scores(resume_text, r_tokens, set(), sections_found)
+    weighted_score = compute_weighted_final_score(section_scores)
 
-    RICHNESS SCORE:
-    raw_ratio = unique meaningful tokens / total words
-    display_score = √(raw_ratio / 0.65) × 98
-
-    A well-written resume with raw_ratio ~0.47 displays as ~73%, not 47%.
-    """
-    r_tokens    = tokenize(resume_text)
-    sections    = detect_sections(resume_text)
-    diagnostics = structural_diagnostics(resume_text)
-    wc          = len(resume_text.split())
-
+    wc        = len(resume_text.split())
     raw_ratio = len(r_tokens) / wc if wc else 0
-    score     = min(math.sqrt(raw_ratio / 0.65) * 98, 98.0)
-    score     = max(score, 5.0)
+    richness  = min(math.sqrt(raw_ratio / 0.65) * 98, 98.0)
+    richness  = max(richness, 5.0)
 
-    tips = generate_tips(resume_text, sections, set())
+    final = round(0.60 * weighted_score + 0.40 * richness, 1)
+
+    diagnostics = structural_diagnostics(resume_text)
+    tips        = generate_tips(resume_text, sections_found, set(), section_scores)
 
     return {
         "mode":           "health",
-        "richness_score": round(score, 1),
+        "richness_score": final,
         "raw_richness":   round(raw_ratio * 100, 1),
         "unique_tokens":  len(r_tokens),
         "word_count":     wc,
-        "sections":       sections,
+        "sections":       sections_found,
+        "section_scores": section_scores,
         "diagnostics":    diagnostics,
         "tips":           tips,
     }
 
 
-def generate_tips(resume_text: str, sections: dict, gaps: set) -> list:
+def generate_tips(resume_text: str, sections: dict, gaps: set, section_scores: dict) -> list:
     tips = []
-    if not sections.get("summary"):
-        tips.append("Add a professional summary — ATS systems use it to classify your profile quickly.")
-    if not sections.get("skills"):
-        tips.append("Add a dedicated Skills section. Many ATS parsers specifically look for this heading.")
-    if not sections.get("projects"):
-        tips.append("Consider adding a Projects section to demonstrate hands-on work.")
+
+    # Section-specific tips based on scores
+    for section, score in sorted(section_scores.items(), key=lambda x: x[1]):
+        if score == 0:
+            tips.append(f"Add a {section} section — ATS systems specifically look for this heading.")
+        elif score < 50:
+            tips.append(f"Strengthen your {section} section — it scores low on keyword density.")
+
     if not re.search(r"\d+\s*%|\$\s*\d+|\d+\s*\+?\s*(years?|months?|clients?|projects?)", resume_text, re.I):
-        tips.append("Quantify achievements — numbers, percentages, and dollar amounts make a real difference.")
+        tips.append("Quantify achievements — numbers and percentages make a real difference.")
+
     if gaps and len(gaps) > 5:
-        tips.append(f"Try weaving in missing keywords naturally — e.g.: {', '.join(list(gaps)[:5])}.")
+        tips.append(f"Weave in missing keywords naturally — e.g.: {', '.join(list(gaps)[:5])}.")
+
     if len(resume_text.split()) < 300:
         tips.append("Expand your content. 400–600 words is the sweet spot for most ATS systems.")
+
     if not tips:
         tips.append("Resume looks solid! Keep tailoring it for each specific role — it pays off.")
-    return tips
+
+    return tips[:5]  # cap at 5 tips
 
 
 def generate_export(result: dict) -> str:
-    """
-    Build plain-text report from session data.
-    Generated entirely in-memory — no file is read or written.
-    """
     mode  = result.get("mode", "full")
     lines = ["resumd — AUDIT REPORT", "=" * 42, ""]
 
     if mode == "full":
         lines += [
-            f"Match Score    : {result['score']}%  {result['tier_emoji']} {result['tier_label']}",
-            f"Coverage       : {result['coverage_pct']}%  (JD keywords found in resume)",
-            f"Jaccard        : {result['jaccard_pct']}%  (overlap vs combined vocabulary)",
+            f"Final Score    : {result['score']}%  {result['tier_emoji']} {result['tier_label']}",
+            f"Coverage       : {result['coverage_pct']}%",
+            f"Jaccard        : {result['jaccard_pct']}%",
             f"Matched Tokens : {result['token_count_matched']} of {result['token_count_jd']} JD keywords",
-            f"Resume Tokens  : {result['token_count_resume']} unique", "",
-            "KEYWORD MATCHES:",
+            "", "SECTION SCORES:",
+        ]
+        for s, sc in result["section_scores"].items():
+            lines.append(f"  {s:<16} {sc}%")
+        lines += [
+            "", "KEYWORD MATCHES:",
             ", ".join(result["matched_keywords"]) or "None", "",
             "KNOWLEDGE GAPS:",
             ", ".join(result["gap_keywords"]) or "None", "",
@@ -313,13 +410,13 @@ def generate_export(result: dict) -> str:
             f"Raw Ratio      : {result['raw_richness']}%",
             f"Unique Tokens  : {result['unique_tokens']}",
             f"Word Count     : {result['word_count']}", "",
+            "SECTION SCORES:",
         ]
+        for s, sc in result["section_scores"].items():
+            lines.append(f"  {s:<16} {sc}%")
+        lines.append("")
 
-    lines += ["DETECTED SECTIONS:"]
-    for s, found in result["sections"].items():
-        lines.append(f"  {'✓' if found else '✗'} {s.upper()}")
-
-    lines += ["", "DIAGNOSTICS:"]
+    lines += ["DIAGNOSTICS:"]
     for d in result["diagnostics"]:
         lines.append(f"  [{d['level'].upper()}] {d['message']}")
 
@@ -330,7 +427,7 @@ def generate_export(result: dict) -> str:
     lines += [
         "", "─" * 42,
         "Generated by resumd.",
-        "No resume data was stored or transmitted to any server or API.",
+        "No resume data was stored or transmitted.",
         "Source: https://github.com/AryaBuwa/resumd",
     ]
     return "\n".join(lines)
@@ -346,7 +443,6 @@ def init_session():
         "resume_text":   None,
         "pdf_warnings":  [],
         "error_message": None,
-        "dark_mode":     True,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -354,416 +450,300 @@ def init_session():
 
 
 def purge_session():
-    """
-    Clears all session data.
-    dark_mode is a UI preference, not data — it survives the purge
-    so the user doesn't lose their theme on every clear.
-    """
-    pref = st.session_state.get("dark_mode", True)
     for k in list(st.session_state.keys()):
         del st.session_state[k]
-    st.session_state["dark_mode"] = pref
     st.rerun()
 
 
 # ─────────────────────────────────────────────
-# CSS
+# CSS  (dark only — config.toml handles base)
 # ─────────────────────────────────────────────
 
-def inject_css(dark: bool):
-    if dark:
-        bg          = "#0f0f0f"
-        bg_card     = "#1a1a1a"
-        bg_input    = "#141414"
-        text        = "#e8e8e8"
-        text2       = "#888888"
-        accent      = "#00d4aa"
-        accent_dim  = "#00a882"
-        border      = "#2a2a2a"
-        badge_bg    = "#1e2d2a"
-        warn_bg     = "#2d2200"; warn_bd = "#ff9800"
-        err_bg      = "#2d1010"; err_bd  = "#f44336"
-        info_bg     = "#0d1a2d"; info_bd = "#2196f3"
-        ok_bg       = "#0d2d1e"; ok_bd   = "#4caf50"
-        upload_bg   = "#1a1a1a"
-    else:
-        bg          = "#f5f5f0"
-        bg_card     = "#ffffff"
-        bg_input    = "#fafafa"
-        text        = "#1a1a1a"
-        text2       = "#555555"
-        accent      = "#00a882"
-        accent_dim  = "#007a60"
-        border      = "#e0e0e0"
-        badge_bg    = "#e8f5f1"
-        warn_bg     = "#fff8e1"; warn_bd = "#e67e00"
-        err_bg      = "#ffebee"; err_bd  = "#c62828"
-        info_bg     = "#e3f2fd"; info_bd = "#1565c0"
-        ok_bg       = "#e8f5e9"; ok_bd   = "#2e7d32"
-        upload_bg   = "#ffffff"
-
-    st.markdown(f"""
+def inject_css():
+    st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
-*, *::before, *::after {{ box-sizing: border-box; }}
+*, *::before, *::after { box-sizing: border-box; }
 
-.stApp {{
-    background-color: {bg} !important;
-    color: {text} !important;
+.stApp, [data-testid="stAppViewContainer"] {
+    background-color: #0f0f0f !important;
     font-family: 'IBM Plex Sans', sans-serif !important;
-}}
-[data-testid="stAppViewContainer"] {{ background-color: {bg} !important; }}
-[data-testid="stHeader"] {{ background: transparent !important; }}
-#MainMenu, footer, header {{ visibility: hidden; }}
-.stDeployButton {{ display: none !important; }}
+}
+[data-testid="stHeader"] { background: transparent !important; }
+#MainMenu, footer, header { visibility: hidden; }
+.stDeployButton { display: none !important; }
 
-label, p, span, div {{ color: {text} !important; }}
-h1,h2,h3,h4 {{ font-family: 'IBM Plex Mono', monospace !important; color: {text} !important; }}
-
-.stTextArea textarea, .stTextInput input {{
-    background-color: {bg_input} !important;
-    color: {text} !important;
-    border: 1px solid {border} !important;
+/* Inputs */
+.stTextArea textarea {
+    background-color: #141414 !important;
+    color: #e8e8e8 !important;
+    border: 1px solid #2a2a2a !important;
     border-radius: 6px !important;
     font-family: 'IBM Plex Mono', monospace !important;
     font-size: 0.85rem !important;
-}}
-.stTextArea textarea:focus {{
-    border-color: {accent} !important;
-    box-shadow: 0 0 0 2px {accent}33 !important;
-    outline: none !important;
-}}
-.stTextArea label, .stTextInput label {{
-    color: {text2} !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important;
-}}
+}
+.stTextArea textarea:focus {
+    border-color: #00d4aa !important;
+    box-shadow: 0 0 0 2px #00d4aa22 !important;
+}
 
-[data-testid="stFileUploadDropzone"],
-[data-testid="stFileUploader"] section,
-section[data-testid="stFileUploadDropzone"] {{
-    background-color: {upload_bg} !important;
-    background: {upload_bg} !important;
-    border: 2px dashed {border} !important;
+/* File uploader */
+[data-testid="stFileUploadDropzone"] {
+    background-color: #141414 !important;
+    border: 2px dashed #2a2a2a !important;
     border-radius: 8px !important;
-}}
-[data-testid="stFileUploadDropzone"]:hover {{ border-color: {accent} !important; }}
-[data-testid="stFileUploadDropzone"] *,
-[data-testid="stFileUploaderDropzoneInstructions"] * {{ color: {text2} !important; }}
-[data-testid="stFileUploadDropzone"] small,
-[data-testid="stFileUploaderDropzoneInstructions"] small,
-[data-testid="stFileUploadDropzone"] span small {{ display: none !important; }}
-[data-testid="stFileUploadDropzone"] button,
-[data-testid="stFileUploaderDropzoneInstructions"] button {{
-    background-color: {bg_card} !important;
-    color: {accent} !important;
-    border: 1px solid {accent} !important;
-    width: auto !important;
-}}
+}
+[data-testid="stFileUploadDropzone"] small { display: none !important; }
 
-/* ── Buttons ── */
-[data-testid="baseButton-secondary"],
-[data-testid="baseButton-primary"],
-[data-testid="baseButton-secondary"]:focus,
-[data-testid="baseButton-primary"]:focus {{
-    background-color: transparent !important;
-    background: transparent !important;
-    color: {accent} !important;
-    border: 1.5px solid {accent} !important;
-    border-radius: 6px !important;
+/* Radio */
+div[role="radiogroup"] label {
     font-family: 'IBM Plex Mono', monospace !important;
     font-size: 0.85rem !important;
-    font-weight: 500 !important;
-    letter-spacing: 0.03em !important;
-    transition: background 0.2s, color 0.2s, box-shadow 0.2s, transform 0.15s !important;
-    width: 100% !important;
-    box-shadow: none !important;
-}}
-[data-testid="baseButton-secondary"]:hover,
-[data-testid="baseButton-primary"]:hover {{
-    background-color: {accent} !important;
-    background: {accent} !important;
-    color: {bg} !important;
-    border-color: {accent} !important;
-    box-shadow: 0 4px 12px {accent}40 !important;
-    transform: translateY(-1px) !important;
-}}
-[data-testid="baseButton-secondary"]:active,
-[data-testid="baseButton-primary"]:active {{
-    transform: translateY(0) !important;
-    box-shadow: none !important;
-}}
-
-.cta-btn [data-testid="baseButton-secondary"],
-.cta-btn [data-testid="baseButton-primary"],
-.cta-btn button {{
-    background-color: {accent} !important;
-    background: {accent} !important;
-    color: {bg} !important;
-    border-color: {accent} !important;
-    font-size: 0.95rem !important;
-}}
-.cta-btn [data-testid="baseButton-secondary"]:hover,
-.cta-btn [data-testid="baseButton-primary"]:hover,
-.cta-btn button:hover {{
-    background-color: {accent_dim} !important;
-    background: {accent_dim} !important;
-    color: {bg} !important;
-    border-color: {accent_dim} !important;
-}}
-
-.danger-btn [data-testid="baseButton-secondary"],
-.danger-btn [data-testid="baseButton-primary"],
-.danger-btn button {{
-    background-color: transparent !important;
-    background: transparent !important;
-    color: {err_bd} !important;
-    border-color: {err_bd} !important;
-    border-width: 1.5px !important;
-}}
-.danger-btn [data-testid="baseButton-secondary"]:hover,
-.danger-btn [data-testid="baseButton-primary"]:hover,
-.danger-btn button:hover {{
-    background-color: {err_bd} !important;
-    background: {err_bd} !important;
-    color: #ffffff !important;
-    border-color: {err_bd} !important;
-}}
-
-.stDownloadButton [data-testid="baseButton-secondary"],
-.stDownloadButton button {{
-    background-color: transparent !important;
-    background: transparent !important;
-    color: {text2} !important;
-    border: 1px solid {border} !important;
-    font-size: 0.8rem !important;
-}}
-.stDownloadButton [data-testid="baseButton-secondary"]:hover,
-.stDownloadButton button:hover {{
-    border-color: {accent} !important;
-    color: {accent} !important;
-    background-color: transparent !important;
-}}
-
-[data-testid="stFileUploadDropzone"] [data-testid="baseButton-secondary"],
-[data-testid="stFileUploadDropzone"] button,
-[data-testid="stFileUploaderDropzoneInstructions"] button {{
-    background-color: {bg_card} !important;
-    background: {bg_card} !important;
-    color: {accent} !important;
-    border: 1px solid {accent} !important;
-    border-radius: 4px !important;
-    font-size: 0.78rem !important;
-    width: auto !important;
-    padding: 0.3rem 0.8rem !important;
-}}
-[data-testid="stFileUploadDropzone"] button:hover {{
-    background-color: {accent} !important;
-    color: {bg} !important;
-}}
-
-/* ── Radio ── */
-.stRadio > div {{ gap: 0.4rem !important; flex-wrap: wrap; }}
-.stRadio label, .stRadio label p {{ color: {text} !important; }}
-div[role="radiogroup"] label {{
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.85rem !important;
-    color: {text} !important;
-    background: {bg_card} !important;
-    border: 1px solid {border} !important;
+    background: #1a1a1a !important;
+    border: 1px solid #2a2a2a !important;
     border-radius: 6px !important;
     padding: 0.35rem 0.8rem !important;
-    cursor: pointer !important;
-    transition: all 0.15s ease !important;
-}}
-div[role="radiogroup"] label:hover {{ border-color: {accent} !important; }}
-div[role="radiogroup"] [data-testid="stMarkdownContainer"] p {{
-    color: {text} !important;
-    margin: 0 !important;
-}}
+    color: #e8e8e8 !important;
+}
+div[role="radiogroup"] label:hover { border-color: #00d4aa !important; }
 
-.stCheckbox label, .stCheckbox label p {{
-    color: {text2} !important;
-    font-size: 0.8rem !important;
-}}
-
-/* ── Expander ── */
-.streamlit-expanderHeader {{
+/* Expander */
+.streamlit-expanderHeader {
     font-family: 'IBM Plex Mono', monospace !important;
     font-size: 0.82rem !important;
-    color: {text2} !important;
-    background: {bg_card} !important;
-    border: 1px solid {border} !important;
+    background: #1a1a1a !important;
+    border: 1px solid #2a2a2a !important;
     border-radius: 6px !important;
-}}
-.streamlit-expanderContent {{
-    background: {bg_card} !important;
-    border: 1px solid {border} !important;
-    border-top: none !important;
+    color: #888888 !important;
+}
+.streamlit-expanderContent {
+    background: #1a1a1a !important;
+    border: 1px solid #2a2a2a !important;
     border-radius: 0 0 6px 6px !important;
-    color: {text} !important;
-}}
-.streamlit-expanderContent p,
-.streamlit-expanderContent li,
-.streamlit-expanderContent code {{ color: {text} !important; }}
+}
 
-/* ── Cards ── */
-.ats-card {{
-    background: {bg_card};
-    border: 1px solid {border};
+/* Cards */
+.ats-card {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
     border-radius: 10px;
     padding: 1.5rem;
     margin-bottom: 1rem;
     animation: fadeInUp 0.4s ease both;
-}}
-.ats-card-accent {{ border-left: 3px solid {accent}; }}
+}
+.ats-card-accent { border-left: 3px solid #00d4aa; }
 
-/* ── Score ── */
-.score-number {{
+/* Score */
+.score-number {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 4.5rem; font-weight: 600;
-    color: {accent}; line-height: 1; text-align: center;
-}}
-.score-label {{
-    font-size: 0.85rem; color: {text2}; text-align: center;
+    color: #00d4aa; line-height: 1; text-align: center;
+}
+.score-label {
+    font-size: 0.85rem; color: #888888; text-align: center;
     text-transform: uppercase; letter-spacing: 0.06em; margin-top: 0.3rem;
-}}
-.score-tier {{
+}
+.score-tier {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 1rem; font-weight: 500;
-    color: {text}; text-align: center; margin-top: 0.4rem;
-}}
-.score-meta {{
+    color: #e8e8e8; text-align: center; margin-top: 0.4rem;
+}
+.score-meta {
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: {text2};
+    font-size: 0.72rem; color: #888888;
     text-align: center; margin-top: 0.6rem;
-}}
-.score-bar-wrap {{
-    width: 100%; height: 5px; background: {border};
-    border-radius: 3px; margin: 0.8rem 0; overflow: hidden;
-}}
-.score-bar-fill {{
-    height: 100%;
-    background: linear-gradient(90deg, {accent_dim}, {accent});
-    border-radius: 3px;
+}
+
+/* Animated score bars */
+.sbar-wrap {
+    width: 100%; height: 8px; background: #2a2a2a;
+    border-radius: 4px; margin: 0.4rem 0; overflow: hidden;
+}
+.sbar-fill {
+    height: 100%; border-radius: 4px;
     animation: growBar 1.2s ease both;
     transform-origin: left;
-}}
+}
 
-/* ── Keywords ── */
-.keyword-grid {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }}
-.kw-match {{
-    background: {ok_bg}; border: 1px solid {ok_bd}; color: {ok_bd};
+/* Dashboard stat boxes */
+.stat-box {
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 8px; padding: 1rem; text-align: center;
+}
+.stat-val {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 1.8rem; font-weight: 600; color: #00d4aa;
+}
+.stat-lbl {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem; color: #888888;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-top: 0.2rem;
+}
+
+/* Section score rows */
+.sec-row {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.5rem 0; border-bottom: 1px solid #2a2a2a;
+}
+.sec-row:last-child { border-bottom: none; }
+.sec-name {
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem;
+    color: #888888; width: 110px; flex-shrink: 0; text-transform: uppercase;
+}
+.sec-bar-wrap { flex: 1; height: 6px; background: #2a2a2a; border-radius: 3px; overflow: hidden; }
+.sec-bar-fill { height: 100%; border-radius: 3px; animation: growBar 1.2s ease both; transform-origin: left; }
+.sec-pct {
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem;
+    color: #e8e8e8; width: 38px; text-align: right; flex-shrink: 0;
+}
+.sec-status { font-size: 0.7rem; width: 60px; flex-shrink: 0; text-align: right; }
+
+/* Keywords */
+.keyword-grid { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
+.kw-match {
+    background: #0d2d1e; border: 1px solid #4caf50; color: #4caf50;
     font-family: 'IBM Plex Mono', monospace; font-size: 0.73rem;
     padding: 0.15rem 0.55rem; border-radius: 4px;
-}}
-.kw-gap {{
-    background: {err_bg}; border: 1px solid {err_bd}; color: {err_bd};
+}
+.kw-gap {
+    background: #2d1010; border: 1px solid #f44336; color: #f44336;
     font-family: 'IBM Plex Mono', monospace; font-size: 0.73rem;
     padding: 0.15rem 0.55rem; border-radius: 4px;
-}}
+}
 
-/* ── Diagnostics ── */
-.diag-warning {{
-    background:{warn_bg}; border-left:3px solid {warn_bd};
-    padding:0.55rem 0.9rem; border-radius:0 6px 6px 0;
-    margin-bottom:0.4rem; font-size:0.83rem; color:{text};
-}}
-.diag-error {{
-    background:{err_bg}; border-left:3px solid {err_bd};
-    padding:0.55rem 0.9rem; border-radius:0 6px 6px 0;
-    margin-bottom:0.4rem; font-size:0.83rem; color:{text};
-}}
-.diag-info {{
-    background:{info_bg}; border-left:3px solid {info_bd};
-    padding:0.55rem 0.9rem; border-radius:0 6px 6px 0;
-    margin-bottom:0.4rem; font-size:0.83rem; color:{text};
-}}
+/* Diagnostics */
+.diag-warning { background:#2d2200; border-left:3px solid #ff9800; padding:0.55rem 0.9rem; border-radius:0 6px 6px 0; margin-bottom:0.4rem; font-size:0.83rem; color:#e8e8e8; }
+.diag-error   { background:#2d1010; border-left:3px solid #f44336; padding:0.55rem 0.9rem; border-radius:0 6px 6px 0; margin-bottom:0.4rem; font-size:0.83rem; color:#e8e8e8; }
+.diag-info    { background:#0d1a2d; border-left:3px solid #2196f3; padding:0.55rem 0.9rem; border-radius:0 6px 6px 0; margin-bottom:0.4rem; font-size:0.83rem; color:#e8e8e8; }
 
-/* ── Section badges ── */
-.sbadge-found {{
-    display:inline-block; background:{ok_bg}; border:1px solid {ok_bd};
-    color:{ok_bd}; font-family:'IBM Plex Mono',monospace; font-size:0.68rem;
-    padding:0.12rem 0.45rem; border-radius:4px; margin:0.12rem;
-    text-transform:uppercase; letter-spacing:0.05em;
-}}
-.sbadge-miss {{
-    display:inline-block; background:{bg}; border:1px solid {border};
-    color:{text2}; font-family:'IBM Plex Mono',monospace; font-size:0.68rem;
-    padding:0.12rem 0.45rem; border-radius:4px; margin:0.12rem;
-    text-transform:uppercase; letter-spacing:0.05em; text-decoration:line-through;
-}}
+/* Section badges */
+.sbadge-found { display:inline-block; background:#0d2d1e; border:1px solid #4caf50; color:#4caf50; font-family:'IBM Plex Mono',monospace; font-size:0.68rem; padding:0.12rem 0.45rem; border-radius:4px; margin:0.12rem; text-transform:uppercase; letter-spacing:0.05em; }
+.sbadge-miss  { display:inline-block; background:#0f0f0f; border:1px solid #2a2a2a; color:#555555; font-family:'IBM Plex Mono',monospace; font-size:0.68rem; padding:0.12rem 0.45rem; border-radius:4px; margin:0.12rem; text-transform:uppercase; letter-spacing:0.05em; text-decoration:line-through; }
 
-/* ── Trust grid ── */
-.trust-grid {{
-    display:grid; grid-template-columns:repeat(2,1fr); gap:0.6rem; margin-top:0.75rem;
-}}
-.trust-item {{
-    background:{badge_bg}; border:1px solid {border}; border-radius:8px;
-    padding:0.65rem 0.85rem; font-size:0.8rem; font-family:'IBM Plex Mono',monospace;
-    color:{text2}; display:flex; align-items:flex-start; gap:0.45rem;
-}}
-.trust-item .ti {{ color:{accent}; flex-shrink:0; }}
+/* Trust grid */
+.trust-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:0.6rem; margin-top:0.75rem; }
+.trust-item { background:#1e2d2a; border:1px solid #2a2a2a; border-radius:8px; padding:0.65rem 0.85rem; font-size:0.8rem; font-family:'IBM Plex Mono',monospace; color:#888888; display:flex; align-items:flex-start; gap:0.45rem; }
+.trust-item .ti { color:#00d4aa; flex-shrink:0; }
 
-/* ── Steps ── */
-.steps-row {{ display:flex; gap:0.75rem; flex-wrap:wrap; margin-top:0.5rem; }}
-.step-item {{
-    flex:1; min-width:130px; background:{bg_card}; border:1px solid {border};
-    border-radius:8px; padding:0.85rem; text-align:center;
-}}
-.step-num {{ font-family:'IBM Plex Mono',monospace; font-size:1.4rem; font-weight:600; color:{accent}; }}
-.step-title {{ font-size:0.82rem; font-weight:500; color:{text}; margin-top:0.3rem; }}
-.step-desc {{ font-size:0.73rem; color:{text2}; margin-top:0.25rem; line-height:1.4; }}
+/* Steps */
+.steps-row { display:flex; gap:0.75rem; flex-wrap:wrap; margin-top:0.5rem; }
+.step-item { flex:1; min-width:130px; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:8px; padding:0.85rem; text-align:center; }
+.step-num  { font-family:'IBM Plex Mono',monospace; font-size:1.4rem; font-weight:600; color:#00d4aa; }
+.step-title { font-size:0.82rem; font-weight:500; color:#e8e8e8; margin-top:0.3rem; }
+.step-desc  { font-size:0.73rem; color:#888888; margin-top:0.25rem; line-height:1.4; }
 
-/* ── Tips ── */
-.tip-item {{
-    display:flex; gap:0.5rem; align-items:flex-start;
-    padding:0.45rem 0; border-bottom:1px solid {border};
-    font-size:0.83rem; color:{text};
-}}
-.tip-item:last-child {{ border-bottom:none; }}
-.tip-icon {{ color:{accent}; flex-shrink:0; }}
+/* Tips */
+.tip-item { display:flex; gap:0.5rem; align-items:flex-start; padding:0.45rem 0; border-bottom:1px solid #2a2a2a; font-size:0.83rem; color:#e8e8e8; }
+.tip-item:last-child { border-bottom:none; }
+.tip-icon { color:#00d4aa; flex-shrink:0; }
 
-/* ── Hero ── */
-.hero-title {{
-    font-family:'IBM Plex Mono',monospace; font-size:2rem;
-    font-weight:600; color:{text}; line-height:1.2;
-}}
-.hero-accent {{ color:{accent}; }}
-.hero-sub {{
-    font-family:'IBM Plex Sans',sans-serif; font-size:0.95rem;
-    color:{text2}; margin-top:0.4rem; line-height:1.6;
-}}
-.mono-tag {{
-    font-family:'IBM Plex Mono',monospace; font-size:0.68rem;
-    background:{badge_bg}; border:1px solid {border}; color:{accent};
-    padding:0.12rem 0.45rem; border-radius:3px; letter-spacing:0.05em;
-}}
-.section-label {{
-    font-family:'IBM Plex Mono',monospace; font-size:0.72rem;
-    letter-spacing:0.1em; opacity:0.45; color:{text};
-}}
-.ats-divider {{ border:none; border-top:1px solid {border}; margin:1.5rem 0; }}
+/* Hero */
+.hero-title { font-family:'IBM Plex Mono',monospace; font-size:2rem; font-weight:600; color:#e8e8e8; line-height:1.2; }
+.hero-accent { color:#00d4aa; }
+.hero-sub { font-family:'IBM Plex Sans',sans-serif; font-size:0.95rem; color:#888888; margin-top:0.4rem; line-height:1.6; }
+.mono-tag { font-family:'IBM Plex Mono',monospace; font-size:0.68rem; background:#1e2d2a; border:1px solid #2a2a2a; color:#00d4aa; padding:0.12rem 0.45rem; border-radius:3px; letter-spacing:0.05em; }
+.section-label { font-family:'IBM Plex Mono',monospace; font-size:0.72rem; letter-spacing:0.1em; opacity:0.45; color:#e8e8e8; }
+.ats-divider { border:none; border-top:1px solid #2a2a2a; margin:1.5rem 0; }
 
-/* ── Animations ── */
-@keyframes fadeInUp {{
-    from {{ opacity:0; transform:translateY(10px); }}
-    to   {{ opacity:1; transform:translateY(0); }}
-}}
-@keyframes growBar {{
-    from {{ transform:scaleX(0); }} to {{ transform:scaleX(1); }}
-}}
-@keyframes pulse {{
-    0%,100% {{ opacity:1; }} 50% {{ opacity:0.4; }}
-}}
+/* Animations */
+@keyframes fadeInUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+@keyframes growBar  { from { transform:scaleX(0); } to { transform:scaleX(1); } }
 
-::-webkit-scrollbar {{ width:5px; height:5px; }}
-::-webkit-scrollbar-track {{ background:{bg}; }}
-::-webkit-scrollbar-thumb {{ background:{border}; border-radius:3px; }}
-::-webkit-scrollbar-thumb:hover {{ background:{accent}; }}
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-track { background:#0f0f0f; }
+::-webkit-scrollbar-thumb { background:#2a2a2a; border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:#00d4aa; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
+# SVG LINE CHART
+# ─────────────────────────────────────────────
+
+def render_section_chart(section_scores: dict, sections_found: dict):
+    """
+    SVG line chart — X axis: sections, Y axis: ATS score 0-100.
+    Shows resume score line vs ATS benchmark line.
+    Dots at each section with score labels.
+    """
+    sections  = list(section_scores.keys())
+    scores    = [section_scores[s] for s in sections]
+    benchmarks = [SECTION_BENCHMARKS[s] for s in sections]
+    n         = len(sections)
+
+    W, H      = 680, 280
+    pad_l, pad_r, pad_t, pad_b = 50, 30, 30, 60
+    chart_w   = W - pad_l - pad_r
+    chart_h   = H - pad_t - pad_b
+
+    def x(i):   return pad_l + (i / (n - 1)) * chart_w
+    def y(v):   return pad_t + (1 - v / 100) * chart_h
+
+    # Build polyline points
+    resume_pts    = " ".join(f"{x(i):.1f},{y(scores[i]):.1f}"    for i in range(n))
+    benchmark_pts = " ".join(f"{x(i):.1f},{y(benchmarks[i]):.1f}" for i in range(n))
+
+    # Build dots and labels for resume line
+    dots = ""
+    for i, (s, sc) in enumerate(zip(sections, scores)):
+        cx    = x(i)
+        cy    = y(sc)
+        col   = score_color(sc)
+        found = sections_found.get(s, False)
+        # dot
+        dots += f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="5" fill="{col}" stroke="#0f0f0f" stroke-width="2"/>'
+        # score label above dot
+        label_y = cy - 12 if cy > pad_t + 20 else cy + 20
+        dots += f'<text x="{cx:.1f}" y="{label_y:.1f}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="11" fill="{col}">{sc}%</text>'
+
+    # Benchmark dots (subtle)
+    bench_dots = ""
+    for i, bv in enumerate(benchmarks):
+        cx = x(i)
+        cy = y(bv)
+        bench_dots += f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3" fill="#888888" stroke="#0f0f0f" stroke-width="1.5"/>'
+
+    # Y axis grid lines and labels
+    grid = ""
+    for val in [0, 25, 50, 75, 100]:
+        gy = y(val)
+        grid += f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{W - pad_r}" y2="{gy:.1f}" stroke="#2a2a2a" stroke-width="1"/>'
+        grid += f'<text x="{pad_l - 8}" y="{gy + 4:.1f}" text-anchor="end" font-family="IBM Plex Mono,monospace" font-size="10" fill="#555555">{val}</text>'
+
+    # X axis labels
+    xlabels = ""
+    for i, s in enumerate(sections):
+        cx = x(i)
+        xlabels += f'<text x="{cx:.1f}" y="{H - 10}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="#888888">{s}</text>'
+
+    svg = f"""
+<div class="ats-card" style="padding:1.2rem;">
+  <div class="section-label" style="margin-bottom:0.75rem;">SECTION PERFORMANCE vs ATS BENCHMARK</div>
+  <svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;">
+    <!-- Grid -->
+    {grid}
+    <!-- Benchmark line -->
+    <polyline points="{benchmark_pts}" fill="none" stroke="#444444" stroke-width="1.5" stroke-dasharray="4,4"/>
+    <!-- Resume line -->
+    <polyline points="{resume_pts}" fill="none" stroke="#00d4aa" stroke-width="2.5"
+              style="animation: none"/>
+    <!-- Benchmark dots -->
+    {bench_dots}
+    <!-- Resume dots + labels -->
+    {dots}
+    <!-- X labels -->
+    {xlabels}
+    <!-- Legend -->
+    <line x1="{pad_l}" y1="{H-28}" x2="{pad_l+20}" y2="{H-28}" stroke="#00d4aa" stroke-width="2.5"/>
+    <text x="{pad_l+25}" y="{H-24}" font-family="IBM Plex Mono,monospace" font-size="10" fill="#888888">Your Resume</text>
+    <line x1="{pad_l+120}" y1="{H-28}" x2="{pad_l+140}" y2="{H-28}" stroke="#444444" stroke-width="1.5" stroke-dasharray="4,4"/>
+    <text x="{pad_l+145}" y="{H-24}" font-family="IBM Plex Mono,monospace" font-size="10" fill="#888888">ATS Benchmark</text>
+  </svg>
+</div>
+"""
+    st.markdown(svg, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
@@ -779,7 +759,7 @@ def render_hero():
   No accounts. No persistent storage. No nonsense.
 </div>
 <br/>
-<span class="mono-tag">v1.0.0</span>&nbsp;
+<span class="mono-tag">v1.1.0</span>&nbsp;
 <span class="mono-tag">ATS SCANNER</span>&nbsp;
 <span class="mono-tag">OPEN SOURCE</span>
 """, unsafe_allow_html=True)
@@ -793,7 +773,7 @@ def render_how_it_works():
     <div class="step-item">
       <div class="step-num">01</div>
       <div class="step-title">Upload Resume</div>
-      <div class="step-desc">Drop your PDF. Text is extracted in-memory on the app server using PyMuPDF.</div>
+      <div class="step-desc">Drop your PDF. Text extracted in-memory using PyMuPDF.</div>
     </div>
     <div class="step-item">
       <div class="step-num">02</div>
@@ -803,12 +783,12 @@ def render_how_it_works():
     <div class="step-item">
       <div class="step-num">03</div>
       <div class="step-title">Analyze</div>
-      <div class="step-desc">Token intersection logic scores your resume — no AI black box.</div>
+      <div class="step-desc">Section-weighted scoring + keyword intersection — no AI black box.</div>
     </div>
     <div class="step-item">
       <div class="step-num">04</div>
       <div class="step-title">Review & Clear</div>
-      <div class="step-desc">Read your report, export it, hit Purge — session discarded. No traces.</div>
+      <div class="step-desc">Read your report, export it, hit Purge — session discarded instantly.</div>
     </div>
   </div>
 </div>
@@ -821,51 +801,150 @@ def render_privacy_poc():
   <div class="section-label">DATA PRIVACY — PROOF OF CONCEPT</div>
   <div style="font-size:0.83rem; margin-top:0.6rem; line-height:1.6; opacity:0.8;">
     Your resume is processed in-memory on the server running this app.
-    It is <b>never written to disk, retained in a database, sent to external processing APIs, or tracked.</b>
+    It is <b>never written to disk, retained in a database, sent to external APIs, or tracked.</b>
     Session data is discarded when the session expires or you hit Purge.
-    The source code is public — verify every claim line by line.
+    Source code is public — verify every claim line by line.
   </div>
   <div class="trust-grid">
-    <div class="trust-item"><span class="ti">✓</span><div><b>No persistent storage</b><br/>No database, no disk writes, no retention of any kind.</div></div>
-    <div class="trust-item"><span class="ti">✓</span><div><b>No external processing APIs</b><br/>PDF parsed in-memory on the app server. Zero third-party transfer.</div></div>
-    <div class="trust-item"><span class="ti">✓</span><div><b>No tracking or logging</b><br/>No analytics, no session recording, no fingerprinting by this app.</div></div>
-    <div class="trust-item"><span class="ti">✓</span><div><b>Open source</b><br/>Every claim is verifiable in the published source code.</div></div>
+    <div class="trust-item"><span class="ti">✓</span><div><b>No persistent storage</b><br/>No database, no disk writes, no retention.</div></div>
+    <div class="trust-item"><span class="ti">✓</span><div><b>No external processing APIs</b><br/>PDF parsed in-memory. Zero third-party transfer.</div></div>
+    <div class="trust-item"><span class="ti">✓</span><div><b>No tracking or logging</b><br/>No analytics, no session recording by this app.</div></div>
+    <div class="trust-item"><span class="ti">✓</span><div><b>Open source</b><br/>Every claim verifiable in the published code.</div></div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
 
-def render_score_full(result: dict):
-    score = result["score"]
+def render_dashboard(result: dict):
+    """Top stats dashboard — 4 key numbers at a glance."""
+    mode = result.get("mode", "full")
+
+    if mode == "full":
+        main_score  = result["score"]
+        matched     = result["token_count_matched"]
+        total_jd    = result["token_count_jd"]
+        coverage    = result["coverage_pct"]
+        sections_found = sum(1 for v in result["sections"].values() if v)
+        total_sections = len(result["sections"])
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown(f"""
+<div class="stat-box">
+  <div class="stat-val">{main_score}%</div>
+  <div class="stat-lbl">Final Score</div>
+</div>""", unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"""
+<div class="stat-box">
+  <div class="stat-val">{matched}</div>
+  <div class="stat-lbl">Keywords Matched</div>
+</div>""", unsafe_allow_html=True)
+        with c3:
+            st.markdown(f"""
+<div class="stat-box">
+  <div class="stat-val">{coverage}%</div>
+  <div class="stat-lbl">JD Coverage</div>
+</div>""", unsafe_allow_html=True)
+        with c4:
+            st.markdown(f"""
+<div class="stat-box">
+  <div class="stat-val">{sections_found}/{total_sections}</div>
+  <div class="stat-lbl">Sections Found</div>
+</div>""", unsafe_allow_html=True)
+
+    else:
+        main_score  = result["richness_score"]
+        unique_tok  = result["unique_tokens"]
+        word_count  = result["word_count"]
+        sections_found = sum(1 for v in result["sections"].values() if v)
+        total_sections = len(result["sections"])
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown(f"""
+<div class="stat-box">
+  <div class="stat-val">{main_score}%</div>
+  <div class="stat-lbl">Health Score</div>
+</div>""", unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"""
+<div class="stat-box">
+  <div class="stat-val">{unique_tok}</div>
+  <div class="stat-lbl">Unique Tokens</div>
+</div>""", unsafe_allow_html=True)
+        with c3:
+            st.markdown(f"""
+<div class="stat-box">
+  <div class="stat-val">{word_count}</div>
+  <div class="stat-lbl">Total Words</div>
+</div>""", unsafe_allow_html=True)
+        with c4:
+            st.markdown(f"""
+<div class="stat-box">
+  <div class="stat-val">{sections_found}/{total_sections}</div>
+  <div class="stat-lbl">Sections Found</div>
+</div>""", unsafe_allow_html=True)
+
+
+def render_score_main(result: dict):
+    mode = result.get("mode", "full")
+    if mode == "full":
+        score      = result["score"]
+        tier_emoji = result["tier_emoji"]
+        tier_label = result["tier_label"]
+        meta       = f"{result['token_count_matched']} of {result['token_count_jd']} JD keywords matched &nbsp;·&nbsp; coverage {result['coverage_pct']}%"
+        label      = "MATCH ANALYSIS SCORE"
+    else:
+        score      = result["richness_score"]
+        tier_emoji = ""
+        tier_label = "Resume Health Check"
+        meta       = f"raw ratio {result['raw_richness']}% &nbsp;·&nbsp; {result['unique_tokens']} unique tokens"
+        label      = "KEYWORD RICHNESS SCORE"
+
     st.markdown(f"""
 <div class="ats-card" style="text-align:center; padding:2rem 1rem;">
   <div class="score-number">{score}%</div>
-  <div class="score-label">Match Analysis Score</div>
-  <div class="score-bar-wrap"><div class="score-bar-fill" style="width:{score}%"></div></div>
-  <div class="score-tier">{result['tier_emoji']} {result['tier_label']}</div>
-  <div class="score-meta">
-    {result['token_count_matched']} of {result['token_count_jd']} JD keywords matched &nbsp;·&nbsp;
-    coverage {result['coverage_pct']}% &nbsp;·&nbsp; jaccard {result['jaccard_pct']}%
+  <div class="score-label">{label}</div>
+  <div class="sbar-wrap" style="margin:0.8rem auto; max-width:400px;">
+    <div class="sbar-fill" style="width:{score}%; background:linear-gradient(90deg,#00a882,#00d4aa);"></div>
   </div>
+  <div class="score-tier">{tier_emoji} {tier_label}</div>
+  <div class="score-meta">{meta}</div>
 </div>
 """, unsafe_allow_html=True)
 
 
-def render_score_health(result: dict):
-    score = result["richness_score"]
+def render_section_bars(section_scores: dict, sections_found: dict):
+    """Animated horizontal bars per section with status label."""
+    rows = ""
+    for section, score in section_scores.items():
+        col   = score_color(score)
+        found = sections_found.get(section, False)
+        if not found:
+            status = '<span style="color:#f44336;font-size:0.68rem;">MISSING</span>'
+        elif score >= 75:
+            status = '<span style="color:#00d4aa;font-size:0.68rem;">STRONG</span>'
+        elif score >= 50:
+            status = '<span style="color:#f59e0b;font-size:0.68rem;">FAIR</span>'
+        else:
+            status = '<span style="color:#f44336;font-size:0.68rem;">WEAK</span>'
+
+        rows += f"""
+<div class="sec-row">
+  <div class="sec-name">{section}</div>
+  <div class="sec-bar-wrap">
+    <div class="sec-bar-fill" style="width:{score}%; background:{col};"></div>
+  </div>
+  <div class="sec-pct">{score}%</div>
+  <div class="sec-status">{status}</div>
+</div>"""
+
     st.markdown(f"""
-<div class="ats-card" style="text-align:center; padding:2rem 1rem;">
-  <div class="score-number">{score}%</div>
-  <div class="score-label">Keyword Richness Score</div>
-  <div class="score-bar-wrap"><div class="score-bar-fill" style="width:{score}%"></div></div>
-  <div class="score-tier">Resume Health Check</div>
-  <div class="score-meta">
-    {result['unique_tokens']} unique tokens &nbsp;·&nbsp;
-    {result['word_count']} total words &nbsp;·&nbsp;
-    raw ratio {result['raw_richness']}%
-  </div>
-</div>
-""", unsafe_allow_html=True)
+<div class="ats-card">
+  <div class="section-label" style="margin-bottom:0.75rem;">SECTION BREAKDOWN</div>
+  {rows}
+</div>""", unsafe_allow_html=True)
 
 
 def render_explainability(mode: str, result: dict):
@@ -873,49 +952,31 @@ def render_explainability(mode: str, result: dict):
         c = result.get("coverage_pct", "—")
         j = result.get("jaccard_pct",  "—")
         body = f"""
-**Two signals, one honest score.**
+**How the score is calculated:**
 
-- **Coverage ({c}%)** — what % of the JD's unique keywords appear in your resume *(70% weight)*
-- **Jaccard ({j}%)** — shared keywords ÷ all unique keywords across both docs *(30% weight)*
+Section scores (60% weight) — each resume section is scored individually on keyword density and JD overlap, then weighted by ATS importance (Skills 25%, Experience 30%, Projects 20%, etc.)
+
+Keyword match score (40% weight) — Coverage ({c}%) and Jaccard similarity ({j}%) blended, square-root scaled.
 
 ```
-blended  = 0.70 × coverage  +  0.30 × jaccard
-display  = √blended × 98
+final = 0.60 × section_weighted_score + 0.40 × keyword_score
 ```
-
-The square-root stretch means covering 50% of a JD lands you ~70%, not 50% — because that's genuinely good alignment. Hard ceiling of 98% — a perfect score is a red flag, not a goal.
+Hard ceiling of 98% — a perfect score is a red flag.
 """
     else:
-        r = result.get("raw_richness", "—")
         body = f"""
-**Vocabulary diversity, scaled fairly.**
+**How the health score is calculated:**
 
-Raw ratio (unique tokens ÷ total words): **{r}%**
+Section scores (60% weight) — each section scored by keyword richness and density.
 
-A well-written resume typically has a raw ratio of 45–60%. We scale it:
-
+Vocabulary richness (40% weight):
 ```
-display = √(raw_ratio / 0.65) × 98
+raw_ratio = unique tokens ÷ total words
+richness  = √(raw_ratio / 0.65) × 98
 ```
-
-So raw 47% → display ~73%. That's honest — high vocabulary diversity *is* good writing.
 """
     with st.expander("How was this score calculated?"):
         st.markdown(body)
-
-
-def render_sections(sections: dict):
-    badges = "".join(
-        f'<span class="sbadge-found">✓ {s.upper()}</span>' if found
-        else f'<span class="sbadge-miss">{s.upper()}</span>'
-        for s, found in sections.items()
-    )
-    st.markdown(f"""
-<div class="ats-card">
-  <div class="section-label">DETECTED SECTIONS</div>
-  <div style="margin-top:0.6rem;">{badges}</div>
-</div>
-""", unsafe_allow_html=True)
 
 
 def render_keywords(matched: list, gaps: list):
@@ -942,7 +1003,7 @@ def render_keywords(matched: list, gaps: list):
 def render_diagnostics(diagnostics: list):
     icons = {"warning": "⚠", "error": "✖", "info": "ℹ"}
     items = "".join(
-        f'<div class="diag-{d["level"]}">{icons.get(d["level"], "·")} {d["message"]}</div>'
+        f'<div class="diag-{d["level"]}">{icons.get(d["level"],"·")} {d["message"]}</div>'
         for d in diagnostics
     )
     st.markdown(f"""
@@ -964,20 +1025,17 @@ def render_tips(tips: list):
 </div>""", unsafe_allow_html=True)
 
 
-def render_footer(dark: bool):
-    border_c = "#2a2a2a" if dark else "#e0e0e0"
-    text_c   = "#555555" if dark else "#444444"
-    link_c   = "#00d4aa" if dark else "#00a882"
-    st.markdown(f"""
-<div style="border-top:1px solid {border_c}; padding:1.5rem 0 2.5rem; display:flex;
+def render_footer():
+    st.markdown("""
+<div style="border-top:1px solid #2a2a2a; padding:1.5rem 0 2.5rem; display:flex;
      justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-top:2rem;">
-  <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; color:{text_c};">
-    resumd &nbsp;·&nbsp; v1.0.0 &nbsp;·&nbsp; zero data retained
+  <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; color:#555555;">
+    resumd &nbsp;·&nbsp; v1.1.0 &nbsp;·&nbsp; zero data retained
   </div>
-  <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; color:{text_c};">
+  <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; color:#555555;">
     built by &nbsp;<a href="https://github.com/AryaBuwa" target="_blank"
-      style="color:{link_c}; text-decoration:none; font-weight:500;
-             border-bottom:1px solid {link_c};">Arya</a>
+      style="color:#00d4aa; text-decoration:none; font-weight:500;
+             border-bottom:1px solid #00d4aa;">Arya</a>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -996,54 +1054,9 @@ def main():
     )
 
     init_session()
+    inject_css()
 
-    col_hero, col_toggle = st.columns([5, 1])
-    with col_toggle:
-        dark = st.checkbox("🌙", value=st.session_state.dark_mode,
-                           key="dark_mode_toggle", help="Toggle dark / light mode")
-        st.session_state.dark_mode = dark
-
-    inject_css(dark)
-
-    # JS fallback — forces button colours Streamlit's shadow DOM overrides CSS for.
-    accent_js = "#00d4aa" if dark else "#00a882"
-    bg_js     = "#0f0f0f" if dark else "#f5f5f0"
-    err_js    = "#f44336" if dark else "#c62828"
-    card_js   = "#1a1a1a" if dark else "#ffffff"
-    st.markdown(f"""
-<script>
-(function applyButtonFix() {{
-    function fix() {{
-        document.querySelectorAll('[data-testid="baseButton-secondary"],[data-testid="baseButton-primary"]').forEach(function(btn) {{
-            if (btn.closest('.cta-btn')) {{
-                btn.style.setProperty('background-color','{accent_js}','important');
-                btn.style.setProperty('color','{bg_js}','important');
-                btn.style.setProperty('border-color','{accent_js}','important');
-            }} else if (btn.closest('.danger-btn')) {{
-                btn.style.setProperty('background-color','transparent','important');
-                btn.style.setProperty('color','{err_js}','important');
-                btn.style.setProperty('border-color','{err_js}','important');
-            }} else if (!btn.closest('[data-testid="stFileUploadDropzone"]') && !btn.closest('.stDownloadButton')) {{
-                btn.style.setProperty('background-color','transparent','important');
-                btn.style.setProperty('color','{accent_js}','important');
-                btn.style.setProperty('border-color','{accent_js}','important');
-            }}
-        }});
-        document.querySelectorAll('[data-testid="stFileUploadDropzone"] button').forEach(function(btn) {{
-            btn.style.setProperty('background-color','{card_js}','important');
-            btn.style.setProperty('color','{accent_js}','important');
-            btn.style.setProperty('border','1px solid {accent_js}','important');
-        }});
-    }}
-    fix();
-    new MutationObserver(fix).observe(document.body,{{childList:true,subtree:true}});
-}})();
-</script>
-""", unsafe_allow_html=True)
-
-    with col_hero:
-        render_hero()
-
+    render_hero()
     st.markdown("<br/>", unsafe_allow_html=True)
     render_how_it_works()
     st.markdown("<br/>", unsafe_allow_html=True)
@@ -1062,19 +1075,13 @@ def main():
     mode = "full" if "Full" in scan_mode else "health"
 
     st.markdown("<br/>", unsafe_allow_html=True)
-
     st.markdown(
         '<div class="section-label" style="margin-bottom:0.3rem;">'
         'UPLOAD RESUME PDF &nbsp;·&nbsp; MAX 5 MB &nbsp;·&nbsp; PDF ONLY'
         '</div>',
         unsafe_allow_html=True
     )
-    uploaded_file = st.file_uploader(
-        "resume_pdf",
-        type=["pdf"],
-        help="Max 5 MB. Resumes are typically 100 KB – 2 MB.",
-        label_visibility="collapsed",
-    )
+    uploaded_file = st.file_uploader("resume_pdf", type=["pdf"], label_visibility="collapsed")
 
     jd_text = ""
     if mode == "full":
@@ -1083,21 +1090,15 @@ def main():
             "Paste Job Description",
             height=180,
             placeholder="Paste the full job description here. More detail → more accurate score.",
-            help=f"Minimum {MIN_JD_WORDS} words recommended.",
         )
 
     st.markdown("<br/>", unsafe_allow_html=True)
 
     col_run, col_purge = st.columns([3, 1])
     with col_run:
-        st.markdown('<div class="cta-btn">', unsafe_allow_html=True)
-        run_clicked = st.button("▶  Run Analysis", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        run_clicked = st.button("▶  Run Analysis", use_container_width=True, type="primary")
     with col_purge:
-        st.markdown('<div class="danger-btn">', unsafe_allow_html=True)
-        purge_clicked = st.button("✕  Purge Session", use_container_width=True,
-                                  help="Clears all session data immediately.")
-        st.markdown("</div>", unsafe_allow_html=True)
+        purge_clicked = st.button("✕  Purge", use_container_width=True)
 
     if purge_clicked:
         purge_session()
@@ -1109,24 +1110,17 @@ def main():
 
         if uploaded_file is None:
             st.session_state.error_message = "No PDF uploaded. Please select a file to continue."
-
         elif uploaded_file.size > MAX_FILE_SIZE_BYTES:
             mb = uploaded_file.size / (1024 * 1024)
-            st.session_state.error_message = (
-                f"File too large ({mb:.1f} MB). Limit is {MAX_FILE_SIZE_MB} MB. "
-                "Try re-saving or compressing the PDF."
-            )
-
+            st.session_state.error_message = f"File too large ({mb:.1f} MB). Limit is {MAX_FILE_SIZE_MB} MB."
         elif mode == "full" and len(jd_text.strip().split()) < MIN_JD_WORDS:
             wc = len(jd_text.strip().split())
             st.session_state.error_message = (
                 f"Job description too short ({wc} words). "
-                f"Please paste at least {MIN_JD_WORDS} words, "
-                "or switch to Resume Health Check mode."
+                f"Paste at least {MIN_JD_WORDS} words, or switch to Resume Health Check."
             )
-
         else:
-            file_bytes = uploaded_file.read()  # in-memory only, never written to disk
+            file_bytes = uploaded_file.read()
             with st.spinner("Extracting and analyzing…"):
                 resume_text, warnings = extract_pdf_text(file_bytes)
 
@@ -1134,7 +1128,7 @@ def main():
 
             if not resume_text.strip():
                 st.session_state.error_message = (
-                    "No extractable text found. This PDF may be image-based or scanned. "
+                    "No extractable text found. This PDF may be image-based. "
                     "Please use a digitally-created, text-selectable PDF."
                 )
             else:
@@ -1172,28 +1166,39 @@ def main():
                         unsafe_allow_html=True)
             st.markdown("<br/>", unsafe_allow_html=True)
 
+            # Dashboard
+            render_dashboard(result)
+            st.markdown("<br/>", unsafe_allow_html=True)
+
+            # Main score
+            render_score_main(result)
+
+            # Explainability
+            render_explainability(result.get("mode","full"), result)
+
+            # SVG Line Chart
+            render_section_chart(result["section_scores"], result["sections"])
+
+            # Section breakdown bars
+            render_section_bars(result["section_scores"], result["sections"])
+
+            # Keywords (full mode only)
             mk = result.get("mode", "full")
-            if mk == "full":
-                render_score_full(result)
-            else:
-                render_score_health(result)
-
-            render_explainability(mk, result)
-            render_sections(result["sections"])
-
             if mk == "full":
                 render_keywords(result["matched_keywords"], result["gap_keywords"])
 
+            # Diagnostics
             render_diagnostics(result["diagnostics"])
+
+            # Tips
             render_tips(result["tips"])
 
             st.markdown("<br/>", unsafe_allow_html=True)
             st.download_button(
-                label="↓  Download Plain Text Report",
+                label="↓  Download Full Report",
                 data=generate_export(result),
                 file_name="resumd_audit_report.txt",
                 mime="text/plain",
-                help="Generated from session memory. Nothing is sent anywhere.",
             )
 
             st.markdown(
@@ -1204,7 +1209,7 @@ def main():
                 unsafe_allow_html=True
             )
 
-    render_footer(dark)
+    render_footer()
 
 
 if __name__ == "__main__":
